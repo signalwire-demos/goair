@@ -1,0 +1,73 @@
+{
+  "name": "goair",
+  "description": "GoAir - AI-powered flight booking agent with SignalWire",
+  "keywords": ["signalwire", "ai", "agent", "flight", "booking", "amadeus", "python"],
+  "env": {
+    "SIGNALWIRE_PHONE_NUMBER": {
+      "description": "SignalWire phone number for GoAir",
+      "required": true
+    },
+    "AMADEUS_CLIENT_ID": {
+      "description": "Amadeus Self-Service API client ID",
+      "required": true
+    },
+    "AMADEUS_CLIENT_SECRET": {
+      "description": "Amadeus Self-Service API client secret",
+      "required": true
+    },
+    "AMADEUS_BASE_URL": {
+      "description": "Amadeus API base URL (test or production)",
+      "value": "https://test.api.amadeus.com"
+    },
+    "GOOGLE_MAPS_API_KEY": {
+      "description": "Google Maps API key for geocoding",
+      "required": true
+    },
+    "SWML_PROXY_URL_BASE": {
+      "description": "Public URL base for SWML callbacks (e.g., 'https://goair.example.com')",
+      "required": true
+    },
+    "SWML_BASIC_AUTH_USER": {
+      "description": "Basic auth username for SWML endpoints (optional, auto-generated if not set)",
+      "required": false
+    },
+    "SWML_BASIC_AUTH_PASSWORD": {
+      "description": "Basic auth password for SWML endpoints (optional, auto-generated if not set)",
+      "required": false
+    },
+    "DISPLAY_PHONE_NUMBER": {
+      "description": "Formatted phone number for dashboard display (optional)",
+      "required": false
+    },
+    "AI_MODEL": {
+      "description": "AI model to use",
+      "value": "gpt-4o-mini"
+    },
+    "PORT": {
+      "description": "Server port",
+      "value": "3000"
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "healthchecks": {
+    "web": [
+      {
+        "type": "startup",
+        "name": "port listening",
+        "listening": true,
+        "attempts": 10,
+        "wait": 5,
+        "timeout": 60
+      }
+    ]
+  }
+}

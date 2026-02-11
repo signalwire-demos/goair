@@ -117,7 +117,8 @@ class VoyagerAgent(AgentBase):
 
         # AI model
         self.set_param("ai_model", config.AI_MODEL)
-        self.set_prompt_llm_params(top_p=1.0, temperature=1.0)
+        self.set_param("end_of_speech_timeout", 600)
+        self.set_prompt_llm_params(top_p=0.3, temperature=1.0)
 
         # Personality
         self.prompt_add_section("Personality",
@@ -194,7 +195,7 @@ class VoyagerAgent(AgentBase):
             "  4. Seat preference: 'Do you prefer a window or aisle seat?'",
             "  5. Cabin preference: 'Do you usually fly economy, premium economy, business, or first class?'",
             "  6. Home airport: 'And which airport do you normally fly from?'",
-            "Once you have all answers, call register_passenger with the collected details",
+            "Once you have all answers, call register_passenger with ALL collected details including home_airport_name",
             "After register_passenger confirms, move to get_origin",
         ])
         setup_profile.add_bullets("Do NOT", [
@@ -224,6 +225,7 @@ class VoyagerAgent(AgentBase):
             "Do NOT ask about the destination here — that is the next step",
             "Do NOT skip calling resolve_location — every airport must be resolved to an IATA code, even the home airport",
             "Do NOT guess IATA codes — always use the tool",
+            "Do NOT call resolve_location until the caller has answered — ask first, WAIT for their spoken response, THEN resolve",
         ])
         get_origin.set_step_criteria("Origin airport resolved and confirmed")
         get_origin.set_functions(["resolve_location"])
@@ -951,7 +953,7 @@ class VoyagerAgent(AgentBase):
 
             result = SwaigFunctionResult(
                 f"Profile saved for {first_name} {last_name}. "
-                "Now ask where they'd like to fly."
+                "Ask where they would like to fly today."
             )
             result.update_global_data({
                 "passenger_profile": profile,
