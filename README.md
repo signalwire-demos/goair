@@ -1,6 +1,13 @@
-# GoAir - AI Flight Booking Agent
+<p align="center">
+  <img src="web/img/logo.png" alt="GoAir" width="280">
+</p>
 
-GoAir is a voice-powered AI flight booking system built on [SignalWire](https://signalwire.com). Callers dial in, speak naturally, and the AI agent — **Voyager** — searches live flights via the Amadeus API, compares options, confirms pricing, books trips, and sends SMS confirmations. All by voice.
+<h1 align="center">GoAir - AI Flight Booking Agent</h1>
+
+<p align="center">
+  Voice-powered flight booking built on <a href="https://signalwire.com">SignalWire</a>.<br>
+  Callers dial in, speak naturally, and the AI agent — <strong>Voyager</strong> — searches live flights via the Amadeus API, compares options, confirms pricing, books trips, and sends SMS confirmations. All by voice.
+</p>
 
 ## How It Works
 
