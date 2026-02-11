@@ -14,74 +14,94 @@
 A caller dials a SignalWire phone number. Voyager answers, recognizes returning passengers by caller ID, and walks them through the entire booking flow conversationally. New callers set up a profile first (name, DOB, preferences, home airport), then book. Returning callers skip straight to "Where are you flying?"
 
 ```
-Caller dials in
-       |
-  _per_call_config (lookup by phone)
-       |
-   New caller?  ──yes──>  Greeting  ──>  Setup Profile  ──>  Get Origin
-       |                                                          |
-      no                                                          |
-       |                                                          v
-   Greeting (by name)  ──────────────────────────────────>  Get Origin
-                                                                |
-                                                                v
-                                                          Get Destination
-                                                                |
-                                                                v
-                                                          Collect Dates
-                                                                |
-                                                                v
-                                                        Collect Passengers
-                                                                |
-                                                                v
-                                                          Search Flights
-                                                                |
-                                                                v
-                                                         Present Options
-                                                                |
-                                                                v
-                                                          Confirm Price
-                                                                |
-                                              ┌─────────────────┤
-                                         (profile)         (no profile)
-                                              |                 |
-                                              v                 v
-                                        Create Booking    Collect Pax Info
-                                              |                 |
-                                              v                 v
-                                           Wrap Up        Create Booking
-                                                                |
-                                                                v
-                                                             Wrap Up
+                          Caller dials in
+                               │
+                    _per_call_config (phone lookup)
+                               │
+                         ┌─────┴─────┐
+                     new caller?  returning?
+                         │           │
+                         v           v
+                      Greeting    Greeting
+                    (welcome!)   (by name)
+                         │           │
+                         v           │
+                   Setup Profile     │
+                         │           │
+                         └─────┬─────┘
+                               v
+         ┌──────────────> Get Origin ──────────┐
+         │                     │               v
+         │              (single match)   Disambiguate
+         │                     │           Origin
+         │                     │               │
+         │                     └─────┬─────────┘
+         │                           v
+         │               ┌─── Get Destination ─────┐
+         │               │         │               v
+         │               │  (single match)   Disambiguate
+         │               │         │          Destination
+         │               │         │               │
+         │               │         └─────┬─────────┘
+         │               │               v
+         │               │       Collect Dates &
+         │               │         Passengers
+         │               │               │
+         │               │               v
+         │               │        Search Flights ──────┐
+         │               │               │             │
+         │               │               v             │
+         │  (change      │       Present Options       │
+         │   route)      │               │             │
+         │               │               v             │
+         │               │        Confirm Price        │
+         │               │               │             │
+         │               │         ┌─────┴─────┐       │
+         │               │    (profile)    (no profile)│
+         │               │         │           │       │
+         │               │         v           v       │
+         │               │   Create       Collect Pax  │
+         │               │   Booking        Info       │
+         │               │         │           │       │
+         │               │         │     Create Booking│
+         │               │         │           │       │
+         │               │         └─────┬─────┘       │
+         │               │               v             │
+         │               │           Wrap Up           │
+         │               │                             │
+         │               │      Error Recovery  <──────┘
+         │               │        │         │
+         └───────────────┘        │         │
+              (new dest)          └─────────┘
+                              (retry search/dates)
 ```
 
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│  SignalWire Cloud                                          │
-│  ┌──────────┐   ┌──────────────┐   ┌───────────────────┐   │
-│  │  Phone # │──>│  SWML Engine │──>│  Voyager Agent    │   │
-│  └──────────┘   └──────────────┘   │  (signalwire)     │   │
-│                                    └────────┬──────────┘   │
-└─────────────────────────────────────────────┼──────────────┘
-                                              │
-                              ┌───────────────┼─────────────────┐
-                              │               │                 │
-                        ┌─────▼─────┐  ┌──────▼──────┐   ┌──────▼──────┐
-                        │  Amadeus  │  │ Google Maps │   │   SQLite    │
-                        │  API      │  │ Geocoding   │   │   State DB  │
-                        └───────────┘  └─────────────┘   └─────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  SignalWire Cloud                                           │
+│                                                             │
+│  ┌──────────┐   ┌──────────────┐   ┌─────────────────────┐  │
+│  │ Phone #  │──>│  SWML Engine │──>│  Voyager Agent      │  │
+│  └──────────┘   └──────────────┘   │  (signalwire-agents)│  │
+│                                    └──────────┬──────────┘  │
+└───────────────────────────────────────────────┼─────────────┘
+                                                │
+                        ┌───────────────────────┼─────────────────┐
+                        │                       │                 │
+                  ┌─────▼──────┐        ┌───────▼───────┐   ┌─────▼──────┐
+                  │  Amadeus   │        │  Google Maps  │   │   SQLite   │
+                  │  Python SDK│        │  Geocoding    │   │  State DB  │
+                  └────────────┘        └───────────────┘   └────────────┘
 ```
 
 | Component | Purpose |
 |-----------|---------|
 | **voyager.py** | Main agent — state machine, SWAIG tools, per-call config |
-| **amadeus_client.py** | Amadeus Self-Service API client with OAuth2 and retry |
 | **state_store.py** | SQLite persistence for call state, bookings, and passenger profiles |
 | **config.py** | Environment variable loader and validation |
 | **web/** | Static dashboard — booking table, stats, click-to-call |
-| **test_api_flow.py** | End-to-end Amadeus API test script |
 
 ## Features
 
@@ -90,10 +110,10 @@ Caller dials in
 - First-time callers go through a one-time profile setup: name, email, DOB, gender, seat preference, cabin preference, home airport
 - Returning callers are greeted by name — profile data pre-fills everything
 - Profiles are stored in SQLite and persist across calls
-- Home airport IATA codes are resolved via Amadeus keyword search with progressive suffix stripping
+- Home airport is stored as a name during registration; IATA resolution happens via `resolve_location` when booking (with proper disambiguation for ambiguous cities)
 
 ### State Machine
-Voyager uses a strict state machine with 14 steps. Each step has:
+Voyager uses a strict state machine with 13 steps. Each step has:
 - **Task** — what the AI does in this step
 - **Process** — step-by-step instructions
 - **Functions** — which SWAIG tools are available (all others are disabled)
@@ -106,7 +126,6 @@ The `_per_call_config` callback runs before each request. The SDK creates an eph
 - Looks up the passenger by phone number
 - Sets `global_data` with the passenger profile (or marks as new caller)
 - Modifies the state machine: returning callers skip `setup_profile`, new callers are forced through it
-- Adds prompt sections with caller context
 
 ### Booking Flow (Amadeus)
 1. **Search** — `GET /v2/shopping/flight-offers` — returns up to 3 options
@@ -140,8 +159,7 @@ A single-page web dashboard at `/` shows all bookings with:
 | `disambiguate_origin` | `select_airport` | `get_destination` | Choose between multiple origin airports |
 | `get_destination` | `resolve_location` | `disambiguate_destination`, `collect_dates` | Resolve arrival airport |
 | `disambiguate_destination` | `select_airport` | `collect_dates` | Choose between multiple destination airports |
-| `collect_dates` | `check_cheapest_dates`, `set_travel_dates` | `collect_passengers` | Get departure and optional return dates |
-| `collect_passengers` | `set_passenger_info` | `search_flights` | Number of passengers and cabin class |
+| `collect_dates` | `check_cheapest_dates`, `set_travel_dates`, `set_passenger_info` | `search_flights` | Dates, passenger count, and cabin class |
 | `search_flights` | `search_flights` | `present_options`, `error_recovery` | Search Amadeus for flights |
 | `present_options` | `select_flight` | `confirm_price`, `search_flights`, `collect_dates`, `error_recovery` | Read options, caller picks one |
 | `confirm_price` | `get_flight_price` | `create_booking`, `collect_pax`, `present_options` | Confirm live price |
@@ -156,7 +174,7 @@ A single-page web dashboard at `/` shows all bookings with:
 |------|-----------|---------|
 | `resolve_location` | `location_text`, `location_type` | Google Maps geocoding + Amadeus keyword/proximity search to resolve spoken locations to IATA codes |
 | `select_airport` | `location_type`, `iata_code` | Pick one airport from disambiguation candidates |
-| `register_passenger` | `first_name`, `last_name`, `email`, `date_of_birth`, `gender`, `seat_preference`?, `cabin_preference`?, `home_airport_name`? | Save new passenger profile with IATA resolution for home airport |
+| `register_passenger` | `first_name`, `last_name`, `email`, `date_of_birth`, `gender`, `seat_preference`?, `cabin_preference`?, `home_airport_name`? | Save new passenger profile (home airport stored as name, resolved later via `resolve_location`) |
 | `set_travel_dates` | `departure_date`, `return_date`? | Store confirmed travel dates |
 | `set_passenger_info` | `adults`, `cabin_class` | Store passenger count and cabin preference |
 | `search_flights` | (none) | Search Amadeus using stored state, returns up to 3 voice-friendly summaries |
@@ -233,18 +251,6 @@ gunicorn voyager:app -k uvicorn.workers.UvicornWorker -b 0.0.0.0:3000
 
 The SWML endpoint URL (with auth) is logged on startup. Point your SignalWire phone number's webhook to this URL.
 
-### Testing
-
-Run the end-to-end Amadeus API test (no phone call needed):
-
-```bash
-python test_api_flow.py
-```
-
-This tests: airport search, flight search, price confirmation, fresh-search-match-price-book flow, and PNR creation.
-
-> **Note (Sandbox only):** The Amadeus test environment has limited inventory. Some routes may return `SEGMENT SELL FAILURE` when inventory is exhausted from test bookings. Try different routes or dates further out if this occurs. This does not apply in production.
-
 ## Database Schema
 
 SQLite database (`voyager_state.db`) with three tables:
@@ -299,12 +305,13 @@ Persistent passenger profiles keyed by phone number.
 ```
 goair/
 ├── voyager.py            # Main agent (state machine, tools, per-call config)
-├── amadeus_client.py     # Amadeus API client (OAuth2, search, price, book)
 ├── state_store.py        # SQLite state store (call state, bookings, passengers)
 ├── config.py             # Environment variable loader
-├── test_api_flow.py      # End-to-end API test script
 ├── requirements.txt      # Python dependencies
 ├── .env.example          # Environment template
+├── Procfile              # Heroku/Dokku process definition
+├── app.json              # Heroku app manifest
+├── CHECKS                # Dokku zero-downtime deploy health check
 ├── LICENSE               # MIT License
 ├── web/
 │   ├── index.html        # Dashboard (bookings table, stats)
@@ -312,6 +319,10 @@ goair/
 │   │   └── logo.png      # GoAir logo
 │   └── sounds/
 │       └── typing.mp3    # Wait file played while tools execute
+├── .github/
+│   └── workflows/
+│       ├── deploy.yml    # Production deploy workflow
+│       └── preview.yml   # Preview deploy workflow
 └── calls/                # Saved call data JSON files (auto-created)
 ```
 
