@@ -1,0 +1,33 @@
+# Environment and secrets
+.env
+.env~
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+
+# SQLite database (runtime data)
+*.db
+
+# Backup files
+*.py~
+
+# Call recordings/data (runtime)
+calls/
+
+# IDE / editor
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Internal docs
+INFO.md
