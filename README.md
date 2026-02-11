@@ -214,7 +214,7 @@ AMADEUS_BASE_URL=https://test.api.amadeus.com   # or https://api.amadeus.com for
 GOOGLE_MAPS_API_KEY=your-google-key
 
 # AI Model
-AI_MODEL=claude-sonnet-4-20250514
+AI_MODEL=gpt-4o-mini
 
 # Server
 HOST=0.0.0.0
