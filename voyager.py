@@ -273,26 +273,18 @@ class VoyagerAgent(AgentBase):
 
         # Personality
         self.prompt_add_section("Personality",
-            "You are Voyager, a charming and slightly adventurous AI travel concierge "
-            "with a passion for the journey as much as the destination. "
-            "You're warm, witty, and love a good travel pun — but you keep it brief because "
-            "this is a phone call, not a podcast. Think friendly pilot with a sense of humor. "
-            "You help callers search for flights, compare options, confirm pricing, and book trips. "
-            "Sprinkle in the occasional quip about turbulence, layovers, or window seats, "
-            "but never at the expense of being helpful and efficient."
+            "You are Voyager, a friendly AI travel concierge who helps callers find and book flights. "
+            "Keep it warm and brief — the occasional travel quip is welcome, but efficiency comes first."
         )
 
         # Hard rules for voice behavior and tool discipline
         self.prompt_add_section("Rules", body="", bullets=[
-            "This is a PHONE CALL. Keep every response to 1-2 short sentences. Never give long monologues.",
-            "Ask ONE question at a time. Let the caller answer before moving on.",
-            "Never include meta-instructions, stage directions, or parenthetical notes in your speech. Only say words the caller should hear.",
-            "NEVER make up or guess IATA codes, airport names, flight details, prices, or booking references. You MUST call the tools to get this information.",
-            "NEVER skip calling a tool. You cannot resolve an airport without calling resolve_location. You cannot get flight prices without calling get_flight_price.",
-            "Each step has ONE job. Do that job and nothing else. Do NOT ask about dates during location collection. Do NOT discuss prices during date collection.",
-            "You ONLY help with searching, pricing, and booking flights. If the caller asks about anything else — hotels, car rentals, general knowledge — politely redirect: 'I specialize in flights. Would you like to search for a flight?'",
-            "When reading flight options, use airline NAMES not codes. Say 'Delta' not 'DL'. Say 'seven thirty PM' not '19:30'.",
-            "When spelling back a confirmation code, use the NATO phonetic alphabet.",
+            "This is a PHONE CALL. Keep every response to 1-2 short sentences.",
+            "Ask ONE question at a time. Wait for the answer before continuing.",
+            "NEVER make up IATA codes, airport names, flight details, prices, or PNRs. Always use the tools.",
+            "NEVER skip a required tool call. Every airport needs resolve_location. Every price needs get_flight_price.",
+            "Use airline NAMES not codes ('Delta' not 'DL'). Say times naturally ('seven thirty PM' not '19:30').",
+            "Spell confirmation codes using the NATO phonetic alphabet.",
         ])
 
         # Voice
@@ -324,11 +316,6 @@ class VoyagerAgent(AgentBase):
             "  If RETURNING caller (is_new_caller is false): greet by name using ${global_data.passenger_profile}, ask where they want to fly, move to get_origin",
             "  If NEW caller: welcome them to Voyager, ask for their first and last name, then move to setup_profile",
             "If the caller provides origin and/or destination in their first response, note them for the next step",
-        ])
-        greeting.add_bullets("Do NOT", [
-            "Do NOT search for flights yet — you need resolved IATA codes first",
-            "Do NOT ask for dates yet — collect locations first",
-            "Do NOT offer hotel or activity search",
         ])
         greeting.set_step_criteria("Travel intent detected or name collected for new caller")
         greeting.set_functions("none")
@@ -373,9 +360,7 @@ class VoyagerAgent(AgentBase):
             "  No match: Ask the caller to try a different city name or be more specific",
         ])
         get_origin.add_bullets("Do NOT", [
-            "Do NOT ask about the destination here — that is the next step",
             "Do NOT skip calling resolve_location — every airport must be resolved to an IATA code, even the home airport",
-            "Do NOT guess IATA codes — always use the tool",
             "Do NOT call resolve_location until the caller has answered — ask first, WAIT for their spoken response, THEN resolve",
         ])
         get_origin.set_step_criteria("Origin airport resolved and confirmed")
@@ -392,8 +377,6 @@ class VoyagerAgent(AgentBase):
             "Do NOT move to the next step until select_airport confirms the selection",
         ])
         disambiguate_origin.add_bullets("Do NOT", [
-            "Do NOT present more than 3 airports — it's a phone call",
-            "Do NOT read IATA codes to the caller — use airport names",
             "Do NOT ask about dates or destinations here",
             "Do NOT move to get_destination without calling select_airport first",
         ])
@@ -429,17 +412,15 @@ class VoyagerAgent(AgentBase):
             "Do NOT move to the next step until select_airport confirms the selection",
         ])
         disambiguate_destination.add_bullets("Do NOT", [
-            "Do NOT present more than 3 airports",
-            "Do NOT read IATA codes — use airport names",
             "Do NOT move to collect_dates without calling select_airport first",
         ])
         disambiguate_destination.set_step_criteria("Destination airport stored via select_airport")
         disambiguate_destination.set_functions(["select_airport"])
         disambiguate_destination.set_valid_steps(["collect_dates"])
 
-        # COLLECT DATES
+        # COLLECT DATES & PASSENGERS
         collect_dates = ctx.add_step("collect_dates")
-        collect_dates.add_section("Task", "Collect the travel dates — departure and optional return")
+        collect_dates.add_section("Task", "Collect travel dates, passenger count, and cabin class")
         collect_dates.add_bullets("Process", [
             "Ask: 'When would you like to fly?'",
             "Handle relative dates: 'next Friday', 'in two weeks', 'mid-March' — resolve to YYYY-MM-DD",
@@ -447,38 +428,21 @@ class VoyagerAgent(AgentBase):
             "If round-trip, ask: 'And when would you like to come back?'",
             "If the caller says 'whenever it's cheapest' or is flexible, call check_cheapest_dates and present the top 3 options",
             "Once the caller confirms the dates, call set_travel_dates to store them",
-            "After set_travel_dates confirms, move to collect_passengers",
-        ])
-        collect_dates.add_bullets("Do NOT", [
-            "Do NOT use dates in the past — always validate against today's date",
-            "Do NOT assume round-trip — ask explicitly",
-            "Do NOT ask about passengers or cabin class here — that is the next step",
-            "Do NOT move forward until set_travel_dates has stored the dates",
-        ])
-        collect_dates.set_step_criteria("Dates stored via set_travel_dates")
-        collect_dates.set_functions(["check_cheapest_dates", "set_travel_dates"])
-        collect_dates.set_valid_steps(["collect_passengers"])
-
-        # COLLECT PASSENGERS
-        collect_passengers = ctx.add_step("collect_passengers")
-        collect_passengers.add_section("Task", "Collect the number of passengers and cabin preference")
-        collect_passengers.add_bullets("Process", [
-            "Ask: 'How many passengers will be traveling?'",
+            "After set_travel_dates confirms, ask: 'How many passengers will be traveling?'",
             "For cabin class, check ${global_data.passenger_profile.cabin_preference}:",
             "  If set: suggest it — 'Last time you preferred business class. Same again, or would you like something different?'",
             "  If not set: ask — 'And would you prefer economy, business, or first class?'",
-            "Always confirm — never silently apply a preference",
             "Once both are confirmed, call set_passenger_info to store them",
             "After set_passenger_info confirms, move to search_flights",
         ])
-        collect_passengers.add_bullets("Do NOT", [
+        collect_dates.add_bullets("Do NOT", [
+            "Do NOT move forward until set_travel_dates has stored the dates",
             "Do NOT assume 1 passenger — ask explicitly",
-            "Do NOT skip asking about cabin class",
             "Do NOT move to search_flights until set_passenger_info has stored the details",
         ])
-        collect_passengers.set_step_criteria("Passenger info stored via set_passenger_info")
-        collect_passengers.set_functions(["set_passenger_info"])
-        collect_passengers.set_valid_steps(["search_flights"])
+        collect_dates.set_step_criteria("Dates and passenger info stored")
+        collect_dates.set_functions(["check_cheapest_dates", "set_travel_dates", "set_passenger_info"])
+        collect_dates.set_valid_steps(["search_flights"])
 
         # SEARCH FLIGHTS
         search_flights_step = ctx.add_step("search_flights")
@@ -488,10 +452,6 @@ class VoyagerAgent(AgentBase):
             "The function returns up to 3 options pre-summarized for voice",
             "Move to present_options to read them to the caller",
             "If no results: move to error_recovery",
-        ])
-        search_flights_step.add_bullets("Do NOT", [
-            "Do NOT present results yourself — the function returns voice-ready summaries",
-            "Do NOT call search_flights before set_travel_dates and set_passenger_info have been called",
         ])
         search_flights_step.set_step_criteria("Flight search completed")
         search_flights_step.set_functions(["search_flights"])
@@ -509,7 +469,6 @@ class VoyagerAgent(AgentBase):
             "If caller wants to change origin/destination: move to error_recovery",
         ])
         present_options.add_bullets("Do NOT", [
-            "Do NOT read IATA codes, airline codes, or flight numbers unless the caller asks",
             "Do NOT skip to booking — the caller must pick an option first, then price must be confirmed",
             "Do NOT move to confirm_price without calling select_flight first",
         ])
@@ -586,8 +545,6 @@ class VoyagerAgent(AgentBase):
             "Caller changed mind: 'No problem! Where would you like to fly instead?'",
         ])
         error_recovery.add_bullets("Do NOT", [
-            "Do NOT re-collect passenger name, email, phone, or any profile details — they are already saved",
-            "Do NOT go back to collect_pax or setup_profile",
             "Do NOT start the entire flow over — keep what you have and only change what's needed",
         ])
         error_recovery.set_step_criteria("Recovery action taken")
@@ -630,38 +587,6 @@ class VoyagerAgent(AgentBase):
                 "home_airport_iata": passenger.get("home_airport_iata"),
                 "home_airport_name": passenger.get("home_airport_name"),
             }
-
-            # Backfill: resolve missing home_airport_iata from name
-            if profile["home_airport_name"] and not profile["home_airport_iata"]:
-                import re as _re
-                raw_name = profile["home_airport_name"]
-                queries = [raw_name]
-                stripped = _re.sub(
-                    r'\s+(International|Intl|Airport|Regional|Municipal|Metro|Metropolitan)\b',
-                    '', raw_name, flags=_re.IGNORECASE,
-                ).strip()
-                if stripped and stripped != raw_name:
-                    queries.append(stripped)
-                first_word = raw_name.split()[0]
-                if first_word not in queries:
-                    queries.append(first_word)
-                for query in queries:
-                    try:
-                        kw_results = _search_airports(query)
-                        for item in kw_results:
-                            if item.get("subType") == "AIRPORT" and item.get("iataCode"):
-                                profile["home_airport_iata"] = item["iataCode"]
-                                profile["home_airport_name"] = item.get("name", raw_name).title()
-                                update_passenger(caller_phone,
-                                                 home_airport_iata=profile["home_airport_iata"],
-                                                 home_airport_name=profile["home_airport_name"])
-                                logger.info(f"Backfilled home_airport_iata={profile['home_airport_iata']} "
-                                            f"for {caller_phone}")
-                                break
-                    except Exception as e:
-                        logger.warning(f"Backfill airport lookup failed for '{query}': {e}")
-                    if profile["home_airport_iata"]:
-                        break
 
             agent.set_global_data({
                 "passenger_profile": profile,
@@ -1047,41 +972,7 @@ class VoyagerAgent(AgentBase):
             gender = args["gender"].strip().upper()
             home_airport_name = (args.get("home_airport_name") or "").strip() or None
 
-            # Try to resolve home airport IATA via Amadeus keyword search.
-            # Amadeus keyword search is picky — "Tulsa International" returns
-            # nothing while "Tulsa" works.  Try the full name first, then
-            # progressively strip common suffixes, then try just the first word.
-            home_airport_iata = None
-            if home_airport_name:
-                import re as _re
-                queries = [home_airport_name]
-                # Strip common airport suffixes
-                stripped = _re.sub(
-                    r'\s+(International|Intl|Airport|Regional|Municipal|Metro|Metropolitan)\b',
-                    '', home_airport_name, flags=_re.IGNORECASE,
-                ).strip()
-                if stripped and stripped != home_airport_name:
-                    queries.append(stripped)
-                # Try just the first word (city name)
-                first_word = home_airport_name.split()[0]
-                if first_word not in queries:
-                    queries.append(first_word)
-
-                for query in queries:
-                    try:
-                        kw_results = _search_airports(query)
-                        for item in kw_results:
-                            if item.get("subType") == "AIRPORT" and item.get("iataCode"):
-                                home_airport_iata = item["iataCode"]
-                                home_airport_name = item.get("name", home_airport_name).title()
-                                break
-                    except Exception as e:
-                        logger.warning(f"register_passenger: airport lookup failed for '{query}': {e}")
-                    if home_airport_iata:
-                        break
-
-                if not home_airport_iata:
-                    logger.warning(f"register_passenger: could not resolve IATA for '{home_airport_name}'")
+            home_airport_iata = None  # Resolved later via resolve_location in get_origin
 
             logger.info(f"register_passenger: {first_name} {last_name}, phone={caller_phone}, "
                         f"home_airport={home_airport_iata or home_airport_name}")
@@ -1169,7 +1060,6 @@ class VoyagerAgent(AgentBase):
             )
             save_call_state(call_id, state)
             _sync_summary(result, state)
-            result.swml_change_step("collect_passengers")
             return result
 
         # 4. SET PASSENGER INFO
@@ -1310,20 +1200,6 @@ class VoyagerAgent(AgentBase):
             state["flight_offers"] = offers
             state["flight_summaries"] = summaries
 
-            logger.info(f"search_flights: storing {len(offers)} offers, "
-                        f"offer[0] id={offers[0].get('id')}, "
-                        f"keys={sorted(offers[0].keys())}")
-            for i, itin in enumerate(offers[0].get("itineraries", [])):
-                for seg in itin.get("segments", []):
-                    logger.info(
-                        f"search_flights: offer[0] itin[{i}] "
-                        f"{seg.get('carrierCode','')}{seg.get('number','')} "
-                        f"{seg.get('departure',{}).get('iataCode','')}"
-                        f"({seg.get('departure',{}).get('at','')}) → "
-                        f"{seg.get('arrival',{}).get('iataCode','')}"
-                        f"({seg.get('arrival',{}).get('at','')})"
-                    )
-
             summary_text = " | ".join(summaries)
             count = len(offers)
             result = SwaigFunctionResult(
@@ -1417,23 +1293,6 @@ class VoyagerAgent(AgentBase):
                 result.swml_change_step("search_flights")
                 return result
 
-            # Debug: dump what we loaded from SQLite
-            logger.info(f"get_flight_price: loaded flight_offer type={type(offer).__name__}, "
-                        f"keys={sorted(offer.keys()) if isinstance(offer, dict) else 'N/A'}")
-            if isinstance(offer, dict):
-                for i, itin in enumerate(offer.get("itineraries", [])):
-                    for seg in itin.get("segments", []):
-                        logger.info(
-                            f"get_flight_price: LOADED itin[{i}] "
-                            f"{seg.get('carrierCode','')}{seg.get('number','')} "
-                            f"{seg.get('departure',{}).get('iataCode','')}"
-                            f"({seg.get('departure',{}).get('at','')}) → "
-                            f"{seg.get('arrival',{}).get('iataCode','')}"
-                            f"({seg.get('arrival',{}).get('at','')})"
-                        )
-                logger.info(f"get_flight_price: source={offer.get('source')}, "
-                            f"id={offer.get('id')}, "
-                            f"has travelerPricings={bool(offer.get('travelerPricings'))}")
             logger.info("get_flight_price: attempt 1 — pricing stored offer directly")
 
             priced_data = _price_offer(offer)
@@ -1518,22 +1377,6 @@ class VoyagerAgent(AgentBase):
             state["priced_offer"] = priced_offer
             state["confirmed_price"] = f"${total} {currency}"
             logger.info(f"get_flight_price: confirmed ${total} {currency}")
-
-            # Debug: log segment times and key fields stored with the priced offer
-            for i, itin in enumerate(priced_offer.get("itineraries", [])):
-                for seg in itin.get("segments", []):
-                    logger.info(
-                        f"get_flight_price: STORED itin[{i}] "
-                        f"{seg.get('carrierCode','')}{seg.get('number','')} "
-                        f"{seg.get('departure',{}).get('iataCode','')}"
-                        f"({seg.get('departure',{}).get('at','')}) → "
-                        f"{seg.get('arrival',{}).get('iataCode','')}"
-                        f"({seg.get('arrival',{}).get('at','')})"
-                    )
-            logger.info(f"get_flight_price: offer keys={sorted(priced_offer.keys())}")
-            logger.info(f"get_flight_price: has travelerPricings={bool(priced_offer.get('travelerPricings'))}"
-                        f", source={priced_offer.get('source')}"
-                        f", lastTicketingDate={priced_offer.get('lastTicketingDate')}")
 
             result = SwaigFunctionResult(
                 f"The confirmed price is ${total} {currency} per person including taxes. "
@@ -1632,26 +1475,6 @@ class VoyagerAgent(AgentBase):
             return_date = state.get("return_date")
             cabin = state.get("cabin_class", "ECONOMY")
 
-            def _dump_segments(label, offer):
-                """Log segment details for debugging booking failures."""
-                for i, itin in enumerate(offer.get("itineraries", [])):
-                    for seg in itin.get("segments", []):
-                        logger.info(
-                            f"book_flight: {label} itin[{i}] "
-                            f"{seg.get('carrierCode','')}{seg.get('number','')} "
-                            f"{seg.get('departure',{}).get('iataCode','')}"
-                            f"({seg.get('departure',{}).get('at','')}) → "
-                            f"{seg.get('arrival',{}).get('iataCode','')}"
-                            f"({seg.get('arrival',{}).get('at','')})"
-                        )
-
-            # Debug: dump the priced offer as loaded from SQLite
-            logger.info(f"book_flight: LOADED offer keys={sorted(priced_offer.keys())}")
-            logger.info(f"book_flight: LOADED has travelerPricings={bool(priced_offer.get('travelerPricings'))}"
-                        f", source={priced_offer.get('source')}"
-                        f", lastTicketingDate={priced_offer.get('lastTicketingDate')}")
-            _dump_segments("LOADED", priced_offer)
-
             booking_offer = priced_offer
             price_changed = False
             old_total = priced_offer.get("price", {}).get("grandTotal") or priced_offer.get("price", {}).get("total")
@@ -1675,7 +1498,6 @@ class VoyagerAgent(AgentBase):
 
             # Try 1: book directly with the priced offer from get_flight_price
             logger.info("book_flight: attempt 1 — booking with priced offer")
-            _dump_segments("priced_offer", priced_offer)
             order = _create_order(booking_offer, travelers)
 
             # Try 2: if direct booking failed, do a fresh search → match → reprice → book.
@@ -1713,11 +1535,9 @@ class VoyagerAgent(AgentBase):
                         break
 
                 if matched_offer:
-                    _dump_segments("fresh_match", matched_offer)
                     fresh_price_data = _price_offer(matched_offer)
                     if fresh_price_data and fresh_price_data.get("flightOffers"):
                         booking_offer = fresh_price_data["flightOffers"][0]
-                        _dump_segments("fresh_priced", booking_offer)
                         fresh_total = booking_offer.get("price", {}).get("grandTotal") or booking_offer.get("price", {}).get("total")
                         price_changed = fresh_total != old_total
                         if price_changed:
@@ -1731,10 +1551,7 @@ class VoyagerAgent(AgentBase):
                     else:
                         logger.error("book_flight: fresh reprice returned no offers")
                 else:
-                    logger.error(f"book_flight: no segment match in fresh results, "
-                                 f"dumping first fresh offer for comparison:")
-                    if fresh_offers:
-                        _dump_segments("fresh_offer[0]", fresh_offers[0])
+                    logger.error(f"book_flight: no segment match in {len(fresh_offers or [])} fresh offers")
 
             if not order:
                 result = SwaigFunctionResult(
