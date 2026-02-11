@@ -12,7 +12,7 @@ from signalwire_agents import AgentBase, AgentServer
 from signalwire_agents.core.function_result import SwaigFunctionResult
 
 import config
-from amadeus_client import AmadeusClient
+from amadeus import Client as AmadeusSDK, ResponseError, Location
 from state_store import (
     load_call_state, save_call_state, delete_call_state,
     cleanup_stale_states, build_ai_summary, save_booking, get_all_bookings,
@@ -24,13 +24,164 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
 
-# Initialize API clients
-amadeus = AmadeusClient(
-    config.AMADEUS_CLIENT_ID,
-    config.AMADEUS_CLIENT_SECRET,
-    config.AMADEUS_BASE_URL,
+# Initialize Amadeus SDK (handles OAuth2 + content-type automatically)
+amadeus = AmadeusSDK(
+    client_id=config.AMADEUS_CLIENT_ID,
+    client_secret=config.AMADEUS_CLIENT_SECRET,
+    hostname='test' if 'test' in config.AMADEUS_BASE_URL else 'production',
 )
 config.validate()
+
+
+# ── Amadeus SDK helpers (thin wrappers for error handling) ──────────────
+
+def _log_amadeus_error(context, exc):
+    """Extract and log full error details from an SDK ResponseError.
+
+    The SDK's error formatting swallows details when source lacks 'parameter',
+    and its JSON parser can fail if Content-Type includes charset. We parse
+    the raw body as a fallback.
+    """
+    import json as _json
+    try:
+        result = exc.response.result
+        if not result and exc.response.body:
+            result = _json.loads(exc.response.body)
+        if result:
+            for err in result.get('errors', []):
+                logger.error(
+                    f"Amadeus {context} {exc.response.status_code}: "
+                    f"[{err.get('code')}] {err.get('title', '')} - "
+                    f"{err.get('detail', '')} (source: {err.get('source', {})})"
+                )
+            return
+    except Exception:
+        pass
+    logger.error(f"Amadeus {context} failed: {exc}")
+
+
+def _search_airports(keyword):
+    """Search airports/cities by keyword. Returns list of location dicts."""
+    try:
+        return amadeus.reference_data.locations.get(
+            keyword=keyword, subType=Location.ANY,
+        ).data
+    except ResponseError as e:
+        logger.error(f"Airport search failed for '{keyword}': {e}")
+        return []
+
+
+def _nearest_airports(lat, lng):
+    """Find nearest airports by coordinates. Returns list of location dicts."""
+    try:
+        return amadeus.reference_data.locations.airports.get(
+            latitude=lat, longitude=lng, radius=100, sort='relevance',
+        ).data
+    except ResponseError as e:
+        logger.error(f"Nearest airport search failed: {e}")
+        return []
+
+
+def _search_flights(origin, destination, departure_date, return_date=None,
+                    adults=1, cabin_class="ECONOMY", max_results=5):
+    """Search flight offers. Returns (offers, dictionaries, actual_cabin)."""
+    params = {
+        'originLocationCode': origin,
+        'destinationLocationCode': destination,
+        'departureDate': departure_date,
+        'adults': adults,
+        'travelClass': cabin_class,
+        'max': max_results,
+        'currencyCode': 'USD',
+    }
+    if return_date:
+        params['returnDate'] = return_date
+    try:
+        response = amadeus.shopping.flight_offers_search.get(**params)
+        return response.data, response.result.get('dictionaries', {}), cabin_class
+    except ResponseError as e:
+        logger.error(f"Flight search failed for {cabin_class}: {e}")
+        if cabin_class != "ECONOMY":
+            logger.info(f"Retrying search with ECONOMY (was {cabin_class})")
+            params['travelClass'] = 'ECONOMY'
+            try:
+                response = amadeus.shopping.flight_offers_search.get(**params)
+                return response.data, response.result.get('dictionaries', {}), 'ECONOMY'
+            except ResponseError as e2:
+                logger.error(f"Flight search ECONOMY retry also failed: {e2}")
+        return [], {}, cabin_class
+
+
+def _price_offer(offer):
+    """Confirm live price on a flight offer. Returns pricing data dict or None."""
+    try:
+        return amadeus.shopping.flight_offers.pricing.post(offer).data
+    except ResponseError as e:
+        _log_amadeus_error("pricing", e)
+        return None
+
+
+def _create_order(offer, travelers):
+    """Create a flight booking. Returns order data dict or None."""
+    contacts = []
+    if travelers:
+        t0 = travelers[0]
+        contact = t0.get("contact", {})
+        name = t0.get("name", {})
+        contact_entry = {
+            "addresseeName": {
+                "firstName": name.get("firstName", ""),
+                "lastName": name.get("lastName", ""),
+            },
+            "purpose": "STANDARD",
+            "address": {
+                "lines": ["123 Main St"],
+                "postalCode": "00000",
+                "cityName": "New York",
+                "countryCode": "US",
+            },
+        }
+        if contact.get("emailAddress"):
+            contact_entry["emailAddress"] = contact["emailAddress"]
+        if contact.get("phones"):
+            contact_entry["phones"] = contact["phones"]
+        contacts.append(contact_entry)
+
+    try:
+        response = amadeus.post('/v1/booking/flight-orders', {
+            'data': {
+                'type': 'flight-order',
+                'flightOffers': [offer],
+                'travelers': travelers,
+                'contacts': contacts,
+                'ticketingAgreement': {
+                    'option': 'DELAY_TO_CANCEL',
+                    'delay': '6D',
+                },
+                'remarks': {
+                    'general': [
+                        {'subType': 'GENERAL_MISCELLANEOUS', 'text': 'VOYAGER AI BOOKING'}
+                    ]
+                },
+            }
+        })
+        return response.data
+    except ResponseError as e:
+        # SDK swallows error details — parse from raw body if needed
+        _log_amadeus_error("booking", e)
+        return None
+
+
+def _cheapest_dates(origin, destination, departure_date=None):
+    """Find cheapest travel dates. Returns list of date/price entries."""
+    params = {'origin': origin, 'destination': destination}
+    if departure_date:
+        params['departureDate'] = departure_date
+    try:
+        return amadeus.shopping.flight_dates.get(**params).data
+    except ResponseError as e:
+        logger.error(f"Cheapest dates failed: {e}")
+        return []
 
 # NATO phonetic alphabet for PNR readback
 NATO = {
@@ -496,7 +647,7 @@ class VoyagerAgent(AgentBase):
                     queries.append(first_word)
                 for query in queries:
                     try:
-                        kw_results = amadeus.airport_city_search(query)
+                        kw_results = _search_airports(query)
                         for item in kw_results:
                             if item.get("subType") == "AIRPORT" and item.get("iataCode"):
                                 profile["home_airport_iata"] = item["iataCode"]
@@ -635,12 +786,15 @@ class VoyagerAgent(AgentBase):
             geo = geocode_location(location_text)
 
             # Step 2: Amadeus keyword search
-            keyword_results = amadeus.airport_city_search(location_text)
+            # Amadeus keyword API rejects long strings like "Miami, Florida" —
+            # strip qualifiers after commas and keep just the city/airport name.
+            keyword = location_text.split(",")[0].strip()
+            keyword_results = _search_airports(keyword)
 
             # Step 3: Amadeus proximity search (if we have coordinates)
             proximity_results = []
             if geo:
-                proximity_results = amadeus.airport_nearest_relevant(geo["lat"], geo["lng"])
+                proximity_results = _nearest_airports(geo["lat"], geo["lng"])
 
             # Step 4: Cross-reference and rank
             candidates = {}
@@ -715,6 +869,7 @@ class VoyagerAgent(AgentBase):
                     f"{' in ' + top['city'] if top['city'] else ''}. "
                     "Confirm with the caller that this is correct."
                 )
+                result.add_dynamic_hints([h for h in [top["name"], top["city"]] if h])
                 save_call_state(call_id, state)
                 _sync_summary(result, state)
                 result.swml_change_step(next_step)
@@ -738,6 +893,12 @@ class VoyagerAgent(AgentBase):
                     f"Found multiple airports: {airport_list}. "
                     "Ask the caller which they prefer."
                 )
+                hints = []
+                for a in top_3:
+                    hints.append(a["name"])
+                    if a["city"]:
+                        hints.append(a["city"])
+                result.add_dynamic_hints(hints)
                 save_call_state(call_id, state)
                 _sync_summary(result, state)
                 result.swml_change_step(disambig_step)
@@ -816,6 +977,7 @@ class VoyagerAgent(AgentBase):
                 f"{selected['name']} ({selected['iata']}) selected as {location_type}. "
                 "Confirm with the caller."
             )
+            result.add_dynamic_hints([h for h in [selected["name"], selected["city"]] if h])
             save_call_state(call_id, state)
             _sync_summary(result, state)
             result.swml_change_step(next_step)
@@ -907,7 +1069,7 @@ class VoyagerAgent(AgentBase):
 
                 for query in queries:
                     try:
-                        kw_results = amadeus.airport_city_search(query)
+                        kw_results = _search_airports(query)
                         for item in kw_results:
                             if item.get("subType") == "AIRPORT" and item.get("iataCode"):
                                 home_airport_iata = item["iataCode"]
@@ -1112,7 +1274,7 @@ class VoyagerAgent(AgentBase):
             logger.info(f"search_flights: {origin_iata}->{dest_iata}, {departure_date}, "
                         f"return={return_date}, cabin={cabin}")
 
-            offers, dictionaries, actual_cabin = amadeus.flight_offers_search(
+            offers, dictionaries, actual_cabin = _search_flights(
                 origin=origin_iata,
                 destination=dest_iata,
                 departure_date=departure_date,
@@ -1148,7 +1310,19 @@ class VoyagerAgent(AgentBase):
             state["flight_offers"] = offers
             state["flight_summaries"] = summaries
 
-            logger.info(f"search_flights: stored {len(offers)} offers in DB")
+            logger.info(f"search_flights: storing {len(offers)} offers, "
+                        f"offer[0] id={offers[0].get('id')}, "
+                        f"keys={sorted(offers[0].keys())}")
+            for i, itin in enumerate(offers[0].get("itineraries", [])):
+                for seg in itin.get("segments", []):
+                    logger.info(
+                        f"search_flights: offer[0] itin[{i}] "
+                        f"{seg.get('carrierCode','')}{seg.get('number','')} "
+                        f"{seg.get('departure',{}).get('iataCode','')}"
+                        f"({seg.get('departure',{}).get('at','')}) → "
+                        f"{seg.get('arrival',{}).get('iataCode','')}"
+                        f"({seg.get('arrival',{}).get('at','')})"
+                    )
 
             summary_text = " | ".join(summaries)
             count = len(offers)
@@ -1205,7 +1379,10 @@ class VoyagerAgent(AgentBase):
 
             state["flight_offer"] = flight_offers[idx]
             state["flight_summary"] = flight_summaries[idx] if idx < len(flight_summaries) else None
-            logger.info(f"select_flight: caller chose option {option_number}")
+            selected = flight_offers[idx]
+            logger.info(f"select_flight: caller chose option {option_number}, "
+                        f"offer id={selected.get('id') if isinstance(selected, dict) else 'N/A'}, "
+                        f"keys={sorted(selected.keys()) if isinstance(selected, dict) else 'N/A'}")
 
             result = SwaigFunctionResult(
                 f"Option {option_number} selected. "
@@ -1240,19 +1417,79 @@ class VoyagerAgent(AgentBase):
                 result.swml_change_step("search_flights")
                 return result
 
-            logger.info("get_flight_price: confirming stored offer from DB")
+            # Debug: dump what we loaded from SQLite
+            logger.info(f"get_flight_price: loaded flight_offer type={type(offer).__name__}, "
+                        f"keys={sorted(offer.keys()) if isinstance(offer, dict) else 'N/A'}")
+            if isinstance(offer, dict):
+                for i, itin in enumerate(offer.get("itineraries", [])):
+                    for seg in itin.get("segments", []):
+                        logger.info(
+                            f"get_flight_price: LOADED itin[{i}] "
+                            f"{seg.get('carrierCode','')}{seg.get('number','')} "
+                            f"{seg.get('departure',{}).get('iataCode','')}"
+                            f"({seg.get('departure',{}).get('at','')}) → "
+                            f"{seg.get('arrival',{}).get('iataCode','')}"
+                            f"({seg.get('arrival',{}).get('at','')})"
+                        )
+                logger.info(f"get_flight_price: source={offer.get('source')}, "
+                            f"id={offer.get('id')}, "
+                            f"has travelerPricings={bool(offer.get('travelerPricings'))}")
+            logger.info("get_flight_price: attempt 1 — pricing stored offer directly")
 
-            priced_data = amadeus.flight_offers_price(offer)
-            if not priced_data:
-                return SwaigFunctionResult(
-                    "That fare is no longer available. Let me search again for current options."
+            priced_data = _price_offer(offer)
+            priced_offers = (priced_data or {}).get("flightOffers", [])
+
+            # Fallback: if stored offer is rejected (expired/stale), do a
+            # fresh search → match by carrier+flight numbers → price that.
+            if not priced_offers:
+                logger.warning("get_flight_price: stored offer rejected, trying fresh search fallback")
+                origin = state.get("origin", {})
+                destination = state.get("destination", {})
+                dep_date = state.get("departure_date", "")
+                return_date = state.get("return_date")
+                adults = state.get("adults", 1)
+                cabin = state.get("cabin_class", "ECONOMY")
+
+                # Extract carrier+flight identifiers from the stored offer
+                original_segments = []
+                for itin in offer.get("itineraries", []):
+                    for seg in itin.get("segments", []):
+                        original_segments.append(
+                            f"{seg.get('carrierCode', '')}{seg.get('number', '')}"
+                        )
+                logger.info(f"get_flight_price: matching segments {original_segments}")
+
+                fresh_offers, fresh_dicts, _ = _search_flights(
+                    origin=origin.get("iata", ""),
+                    destination=destination.get("iata", ""),
+                    departure_date=dep_date,
+                    return_date=return_date,
+                    adults=adults,
+                    cabin_class=cabin,
+                    max_results=10,
                 )
+                logger.info(f"get_flight_price: fresh search returned {len(fresh_offers or [])} offers")
 
-            # Extract pricing details
-            priced_offers = priced_data.get("flightOffers", [])
+                matched_offer = None
+                for fo in (fresh_offers or []):
+                    segs = []
+                    for itin in fo.get("itineraries", []):
+                        for seg in itin.get("segments", []):
+                            segs.append(f"{seg.get('carrierCode', '')}{seg.get('number', '')}")
+                    if segs == original_segments:
+                        matched_offer = fo
+                        break
+
+                if matched_offer:
+                    logger.info("get_flight_price: attempt 2 — pricing fresh matched offer")
+                    priced_data = _price_offer(matched_offer)
+                    priced_offers = (priced_data or {}).get("flightOffers", [])
+                else:
+                    logger.error(f"get_flight_price: no segment match in {len(fresh_offers or [])} fresh offers")
+
             if not priced_offers:
                 return SwaigFunctionResult(
-                    "Could not confirm the price. The offer may have expired. "
+                    "Could not confirm the price — the offer may have expired. "
                     "Ask the caller if they'd like to search again."
                 )
 
@@ -1281,6 +1518,22 @@ class VoyagerAgent(AgentBase):
             state["priced_offer"] = priced_offer
             state["confirmed_price"] = f"${total} {currency}"
             logger.info(f"get_flight_price: confirmed ${total} {currency}")
+
+            # Debug: log segment times and key fields stored with the priced offer
+            for i, itin in enumerate(priced_offer.get("itineraries", [])):
+                for seg in itin.get("segments", []):
+                    logger.info(
+                        f"get_flight_price: STORED itin[{i}] "
+                        f"{seg.get('carrierCode','')}{seg.get('number','')} "
+                        f"{seg.get('departure',{}).get('iataCode','')}"
+                        f"({seg.get('departure',{}).get('at','')}) → "
+                        f"{seg.get('arrival',{}).get('iataCode','')}"
+                        f"({seg.get('arrival',{}).get('at','')})"
+                    )
+            logger.info(f"get_flight_price: offer keys={sorted(priced_offer.keys())}")
+            logger.info(f"get_flight_price: has travelerPricings={bool(priced_offer.get('travelerPricings'))}"
+                        f", source={priced_offer.get('source')}"
+                        f", lastTicketingDate={priced_offer.get('lastTicketingDate')}")
 
             result = SwaigFunctionResult(
                 f"The confirmed price is ${total} {currency} per person including taxes. "
@@ -1373,113 +1626,35 @@ class VoyagerAgent(AgentBase):
 
             logger.info(f"book_flight: {first_name} {last_name}, {email}")
 
-            # --- Fresh Search → Match → Price → Book ---
-            # The pricing API echoes back YOUR input segment times — it does NOT
-            # refresh them from the GDS schedule.  If the airline changed the
-            # schedule since the original search (even by 16 minutes), the order
-            # creation fails with SEGMENT SELL FAILURE (34651).
-            #
-            # Fix: do a FRESH search to get current segment times, match the
-            # caller's chosen flight by carrier+flight numbers, price *that*
-            # fresh offer, then book immediately.
-
             origin = state.get("origin", {})
             destination = state.get("destination", {})
-            origin_iata = origin.get("iata", "")
-            dest_iata = destination.get("iata", "")
             dep_date = state.get("departure_date", "")
             return_date = state.get("return_date")
-            adults = state.get("adults", 1)
             cabin = state.get("cabin_class", "ECONOMY")
 
-            # Extract carrier+flight identifiers from the originally selected offer
-            original_offer = state.get("flight_offer") or priced_offer
-            original_segments = []
-            for itin in original_offer.get("itineraries", []):
-                for seg in itin.get("segments", []):
-                    original_segments.append(
-                        f"{seg.get('carrierCode', '')}{seg.get('number', '')}"
-                    )
-
-            logger.info(f"book_flight: fresh search {origin_iata}->{dest_iata}, "
-                        f"matching segments {original_segments}")
-
-            # Step 1: Fresh search — gets current GDS schedule times
-            fresh_offers, _, _ = amadeus.flight_offers_search(
-                origin=origin_iata,
-                destination=dest_iata,
-                departure_date=dep_date,
-                return_date=return_date,
-                adults=adults,
-                cabin_class=cabin,
-                max_results=5,
-            )
-
-            if not fresh_offers:
-                result = SwaigFunctionResult(
-                    "That route doesn't have any available flights right now. "
-                    "All passenger details are still on file — do NOT re-ask for them. "
-                    "Ask if they'd like to try different dates or a different route."
-                )
-                _sync_summary(result, state)
-                result.swml_change_step("error_recovery")
-                return result
-
-            # Step 2: Match the caller's chosen flight in fresh results
-            matched_offer = None
-            for offer in fresh_offers:
-                offer_segments = []
-                for itin in offer.get("itineraries", []):
+            def _dump_segments(label, offer):
+                """Log segment details for debugging booking failures."""
+                for i, itin in enumerate(offer.get("itineraries", [])):
                     for seg in itin.get("segments", []):
-                        offer_segments.append(
-                            f"{seg.get('carrierCode', '')}{seg.get('number', '')}"
+                        logger.info(
+                            f"book_flight: {label} itin[{i}] "
+                            f"{seg.get('carrierCode','')}{seg.get('number','')} "
+                            f"{seg.get('departure',{}).get('iataCode','')}"
+                            f"({seg.get('departure',{}).get('at','')}) → "
+                            f"{seg.get('arrival',{}).get('iataCode','')}"
+                            f"({seg.get('arrival',{}).get('at','')})"
                         )
-                if offer_segments == original_segments:
-                    matched_offer = offer
-                    break
 
-            if not matched_offer:
-                logger.warning(f"book_flight: no match for segments {original_segments} "
-                               f"in {len(fresh_offers)} fresh offers")
-                result = SwaigFunctionResult(
-                    "That exact flight is no longer available — the schedule may have changed. "
-                    "All passenger details are still on file — do NOT re-ask for them. "
-                    "Ask if they'd like to see the current options or try a different route."
-                )
-                _sync_summary(result, state)
-                result.swml_change_step("error_recovery")
-                return result
+            # Debug: dump the priced offer as loaded from SQLite
+            logger.info(f"book_flight: LOADED offer keys={sorted(priced_offer.keys())}")
+            logger.info(f"book_flight: LOADED has travelerPricings={bool(priced_offer.get('travelerPricings'))}"
+                        f", source={priced_offer.get('source')}"
+                        f", lastTicketingDate={priced_offer.get('lastTicketingDate')}")
+            _dump_segments("LOADED", priced_offer)
 
-            logger.info("book_flight: matched fresh offer, pricing now")
-
-            # Step 3: Price the fresh offer (current segment times)
-            fresh_price_data = amadeus.flight_offers_price(matched_offer)
-
-            if not fresh_price_data or not fresh_price_data.get("flightOffers"):
-                result = SwaigFunctionResult(
-                    "That fare is no longer available — it expired. "
-                    "All passenger details are still on file — do NOT re-ask for them. "
-                    "Ask if they'd like to try different dates or a different route."
-                )
-                _sync_summary(result, state)
-                result.swml_change_step("error_recovery")
-                return result
-
-            fresh_offer = fresh_price_data["flightOffers"][0]
-
-            # Check if price changed since the caller confirmed
-            fresh_total = fresh_offer.get("price", {}).get("grandTotal") or fresh_offer.get("price", {}).get("total")
+            booking_offer = priced_offer
+            price_changed = False
             old_total = priced_offer.get("price", {}).get("grandTotal") or priced_offer.get("price", {}).get("total")
-            price_changed = fresh_total != old_total
-
-            if price_changed:
-                logger.info(f"book_flight: price changed from ${old_total} to ${fresh_total}")
-
-            # Update state with fresh offer
-            state["priced_offer"] = fresh_offer
-            save_call_state(call_id, state)
-
-            # Step 4: Book immediately with fresh priced offer
             travelers = [{
                 "id": "1",
                 "dateOfBirth": profile.get("date_of_birth") or "1990-01-01",
@@ -1498,7 +1673,69 @@ class VoyagerAgent(AgentBase):
                 },
             }]
 
-            order = amadeus.flight_create_order(fresh_offer, travelers)
+            # Try 1: book directly with the priced offer from get_flight_price
+            logger.info("book_flight: attempt 1 — booking with priced offer")
+            _dump_segments("priced_offer", priced_offer)
+            order = _create_order(booking_offer, travelers)
+
+            # Try 2: if direct booking failed, do a fresh search → match → reprice → book.
+            # The pricing API echoes back YOUR segment times without refreshing from
+            # the GDS, so stale times from the original search carry through.
+            if not order:
+                logger.warning("book_flight: attempt 1 FAILED, trying fresh search → reprice → book")
+                origin_iata = origin.get("iata", "")
+                dest_iata = destination.get("iata", "")
+                adults = state.get("adults", 1)
+
+                original_segments = []
+                for itin in priced_offer.get("itineraries", []):
+                    for seg in itin.get("segments", []):
+                        original_segments.append(
+                            f"{seg.get('carrierCode', '')}{seg.get('number', '')}"
+                        )
+                logger.info(f"book_flight: matching segments {original_segments}")
+
+                fresh_offers, _, _ = _search_flights(
+                    origin=origin_iata, destination=dest_iata,
+                    departure_date=dep_date, return_date=return_date,
+                    adults=adults, cabin_class=cabin, max_results=10,
+                )
+                logger.info(f"book_flight: fresh search returned {len(fresh_offers or [])} offers")
+
+                matched_offer = None
+                for fo in (fresh_offers or []):
+                    segs = []
+                    for itin in fo.get("itineraries", []):
+                        for seg in itin.get("segments", []):
+                            segs.append(f"{seg.get('carrierCode', '')}{seg.get('number', '')}")
+                    if segs == original_segments:
+                        matched_offer = fo
+                        break
+
+                if matched_offer:
+                    _dump_segments("fresh_match", matched_offer)
+                    fresh_price_data = _price_offer(matched_offer)
+                    if fresh_price_data and fresh_price_data.get("flightOffers"):
+                        booking_offer = fresh_price_data["flightOffers"][0]
+                        _dump_segments("fresh_priced", booking_offer)
+                        fresh_total = booking_offer.get("price", {}).get("grandTotal") or booking_offer.get("price", {}).get("total")
+                        price_changed = fresh_total != old_total
+                        if price_changed:
+                            logger.info(f"book_flight: price changed from ${old_total} to ${fresh_total}")
+                        logger.info("book_flight: attempt 2 — booking with fresh priced offer")
+                        order = _create_order(booking_offer, travelers)
+                        if order:
+                            logger.info("book_flight: attempt 2 SUCCEEDED")
+                        else:
+                            logger.error("book_flight: attempt 2 FAILED")
+                    else:
+                        logger.error("book_flight: fresh reprice returned no offers")
+                else:
+                    logger.error(f"book_flight: no segment match in fresh results, "
+                                 f"dumping first fresh offer for comparison:")
+                    if fresh_offers:
+                        _dump_segments("fresh_offer[0]", fresh_offers[0])
+
             if not order:
                 result = SwaigFunctionResult(
                     "The booking failed — this flight isn't available right now. "
@@ -1514,7 +1751,7 @@ class VoyagerAgent(AgentBase):
             pnr = associated_records[0].get("reference", "UNKNOWN") if associated_records else "UNKNOWN"
             phonetic = nato_spell(pnr)
 
-            price = fresh_offer.get("price", {})
+            price = booking_offer.get("price", {})
             total = price.get("grandTotal") or price.get("total", "?")
 
             state["booking"] = {
@@ -1627,7 +1864,7 @@ class VoyagerAgent(AgentBase):
 
             logger.info(f"check_cheapest_dates: {origin['iata']}->{destination['iata']}, month={month}")
 
-            results = amadeus.flight_cheapest_dates(
+            results = _cheapest_dates(
                 origin=origin["iata"],
                 destination=destination["iata"],
                 departure_date=departure_date,

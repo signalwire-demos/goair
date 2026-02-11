@@ -8,7 +8,7 @@ import re
 import time
 
 import config
-from amadeus_client import AmadeusClient
+from amadeus import Client, ResponseError, Location
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,17 +36,19 @@ def divider(title):
 def main():
     config.validate()
 
-    client = AmadeusClient(
-        config.AMADEUS_CLIENT_ID,
-        config.AMADEUS_CLIENT_SECRET,
-        config.AMADEUS_BASE_URL,
+    client = Client(
+        client_id=config.AMADEUS_CLIENT_ID,
+        client_secret=config.AMADEUS_CLIENT_SECRET,
+        hostname='test' if 'test' in config.AMADEUS_BASE_URL else 'production',
     )
 
     # ── Step 1: Airport Search ──────────────────────────────
     divider("STEP 1: Airport Search")
 
     print(f"\nSearching for origin: '{ORIGIN}'")
-    origin_results = client.airport_city_search(ORIGIN)
+    origin_results = client.reference_data.locations.get(
+        keyword=ORIGIN, subType=Location.ANY,
+    ).data
     if not origin_results:
         print("FAIL: No results for origin")
         sys.exit(1)
@@ -55,7 +57,9 @@ def main():
 
     time.sleep(0.5)
     print(f"\nSearching for destination: '{DESTINATION}'")
-    dest_results = client.airport_city_search(DESTINATION)
+    dest_results = client.reference_data.locations.get(
+        keyword=DESTINATION, subType=Location.ANY,
+    ).data
     if not dest_results:
         print("FAIL: No results for destination")
         sys.exit(1)
@@ -68,15 +72,22 @@ def main():
     trip_desc = f"{DEPARTURE} to {RETURN}" if RETURN else f"{DEPARTURE} (one-way)"
     print(f"\n{ORIGIN} -> {DESTINATION}, {trip_desc}, {CABIN}, {ADULTS} adult")
 
-    offers, dictionaries, actual_cabin = client.flight_offers_search(
-        origin=ORIGIN,
-        destination=DESTINATION,
-        departure_date=DEPARTURE,
-        return_date=RETURN,
-        adults=ADULTS,
-        cabin_class=CABIN,
-        max_results=1,
-    )
+    params = {
+        'originLocationCode': ORIGIN,
+        'destinationLocationCode': DESTINATION,
+        'departureDate': DEPARTURE,
+        'adults': ADULTS,
+        'travelClass': CABIN,
+        'max': 1,
+        'currencyCode': 'USD',
+    }
+    if RETURN:
+        params['returnDate'] = RETURN
+
+    response = client.shopping.flight_offers_search.get(**params)
+    offers = response.data
+    dictionaries = response.result.get('dictionaries', {})
+    actual_cabin = CABIN
 
     if not offers:
         print("FAIL: No flight offers returned")
@@ -97,7 +108,7 @@ def main():
     divider("STEP 3: Flight Offers Price")
     time.sleep(1)
 
-    priced_data = client.flight_offers_price(offer)
+    priced_data = client.shopping.flight_offers.pricing.post(offer).data
     if not priced_data:
         print("\nFAIL: Pricing returned None (check error logs above)")
         sys.exit(1)
@@ -123,17 +134,11 @@ def main():
     # ── Step 4: Create Booking (fresh search → match → price → book) ──
     divider("STEP 4: Fresh Search → Match → Price → Book")
 
-    # The pricing API echoes back YOUR segment times — it doesn't refresh
-    # them from the GDS schedule.  A fresh search gets current times, then
-    # we match the same carrier+flight numbers, price, and book immediately.
-
     time.sleep(1)
     print(f"\nFresh search to get current segment schedule...")
-    fresh_offers, fresh_dicts, _ = client.flight_offers_search(
-        origin=ORIGIN, destination=DESTINATION,
-        departure_date=DEPARTURE, return_date=RETURN,
-        adults=ADULTS, cabin_class=CABIN, max_results=5,
-    )
+    params['max'] = 5
+    fresh_response = client.shopping.flight_offers_search.get(**params)
+    fresh_offers = fresh_response.data
     if not fresh_offers:
         print("FAIL: Fresh search returned no offers")
         sys.exit(1)
@@ -165,7 +170,7 @@ def main():
     # Price the fresh offer
     time.sleep(0.5)
     print("  Re-pricing fresh offer...")
-    fresh_priced = client.flight_offers_price(matched)
+    fresh_priced = client.shopping.flight_offers.pricing.post(matched).data
     if not fresh_priced or not fresh_priced.get("flightOffers"):
         print("FAIL: Fresh pricing returned no offers")
         sys.exit(1)
@@ -192,10 +197,47 @@ def main():
         },
     }]
 
+    # Build contacts
+    contacts = [{
+        "addresseeName": {"firstName": FIRST_NAME, "lastName": LAST_NAME},
+        "purpose": "STANDARD",
+        "address": {
+            "lines": ["123 Main St"],
+            "postalCode": "00000",
+            "cityName": "New York",
+            "countryCode": "US",
+        },
+        "emailAddress": EMAIL,
+        "phones": [{"deviceType": "MOBILE", "countryCallingCode": "1", "number": re.sub(r"[^\d]", "", PHONE)}],
+    }]
+
     print(f"\nBooking for: {FIRST_NAME} {LAST_NAME} ({EMAIL})")
     time.sleep(0.5)
 
-    order = client.flight_create_order(bookable_offer, travelers)
+    try:
+        order_response = client.post('/v1/booking/flight-orders', {
+            'data': {
+                'type': 'flight-order',
+                'flightOffers': [bookable_offer],
+                'travelers': travelers,
+                'contacts': contacts,
+                'ticketingAgreement': {
+                    'option': 'DELAY_TO_CANCEL',
+                    'delay': '6D',
+                },
+                'remarks': {
+                    'general': [
+                        {'subType': 'GENERAL_MISCELLANEOUS', 'text': 'VOYAGER AI BOOKING'}
+                    ]
+                },
+            }
+        })
+        order = order_response.data
+    except ResponseError as e:
+        print(f"\nFAIL: Booking failed: {e}")
+        print("NOTE: Steps 1-3 (search, price, confirm) all passed.")
+        sys.exit(1)
+
     if not order:
         print("\nFAIL: Booking returned None (sandbox may be flaky, try again)")
         print("NOTE: Steps 1-3 (search, price, confirm) all passed.")
