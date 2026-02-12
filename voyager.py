@@ -931,15 +931,42 @@ class VoyagerAgent(AgentBase):
                 "home_airport_iata": home_airport_iata, "home_airport_name": home_airport_name,
             }
 
-            result = SwaigFunctionResult(
-                f"Profile saved for {first_name} {last_name}. Now ask where they'd like to fly."
-            )
             result.update_global_data({
                 "passenger_profile": profile,
                 "is_new_caller": False,
                 "caller_phone": caller_phone,
             })
-            _change_step(result,"get_origin")
+
+            # Pre-set origin from home airport so get_origin can confirm it
+            if home_airport_iata and home_airport_name:
+                call_id = _call_id(raw_data)
+                state = load_call_state(call_id)
+                state["origin"] = {
+                    "iata": home_airport_iata,
+                    "name": home_airport_name,
+                }
+                save_call_state(call_id, state)
+                _sync_summary(result, state)
+
+                result = SwaigFunctionResult(
+                    f"Profile saved for {first_name} {last_name}. "
+                    f"Their home airport is {home_airport_name} ({home_airport_iata}). "
+                    f"Confirm with the caller: 'Would you like to fly from {home_airport_name} today, or somewhere else?' "
+                    "If they confirm, move to get_destination. If they want a different airport, "
+                    "call resolve_location with their answer and location_type='origin'."
+                )
+                result.update_global_data({
+                    "passenger_profile": profile,
+                    "is_new_caller": False,
+                    "caller_phone": caller_phone,
+                })
+                _change_step(result, "get_origin")
+                return result
+
+            result = SwaigFunctionResult(
+                f"Profile saved for {first_name} {last_name}. Now ask where they'd like to fly."
+            )
+            _change_step(result, "get_origin")
             return result
 
         # 5. FINALIZE BOOKING
