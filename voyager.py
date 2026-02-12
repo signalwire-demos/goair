@@ -237,7 +237,7 @@ class VoyagerAgent(AgentBase):
                  "confirm": True,
                  "prompt_add": "Accept natural language but submit in YYYY-MM-DD format."},
                 {"key_name": "adults", "question_text": "How many passengers will be traveling?",
-                 "prompt_add": "Submit as a positive integer (e.g. 1, 2, 3)."},
+                 "prompt_add": "Submit as a positive integer (e.g. 1, 2, 3). Maximum 8 — for larger parties, tell the caller they'll need to contact a travel agent."},
                 {"key_name": "cabin_class", "question_text": "What cabin class would you like — economy, premium economy, business, or first?",
                  "prompt_add": "Submit exactly ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST. If the passenger has a stored cabin preference in their profile, suggest it."},
             ],
@@ -255,7 +255,7 @@ class VoyagerAgent(AgentBase):
                  "confirm": True,
                  "prompt_add": "Accept natural language but submit in YYYY-MM-DD format. Must be after departure date."},
                 {"key_name": "adults", "question_text": "How many passengers will be traveling?",
-                 "prompt_add": "Submit as a positive integer (e.g. 1, 2, 3)."},
+                 "prompt_add": "Submit as a positive integer (e.g. 1, 2, 3). Maximum 8 — for larger parties, tell the caller they'll need to contact a travel agent."},
                 {"key_name": "cabin_class", "question_text": "What cabin class would you like — economy, premium economy, business, or first?",
                  "prompt_add": "Submit exactly ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST. If the passenger has a stored cabin preference in their profile, suggest it."},
             ],
@@ -961,7 +961,17 @@ class VoyagerAgent(AgentBase):
             fields = {a["key_name"]: a["answer"] for a in answers}
 
             state["departure_date"] = fields.get("departure_date")
-            state["adults"] = int(fields.get("adults", "1"))
+            adults = int(fields.get("adults", "1"))
+            if adults > 8:
+                result = SwaigFunctionResult(
+                    f"We can only book up to 8 passengers at a time. "
+                    f"The caller requested {adults}. Let them know they'll need to "
+                    "contact a travel agent for parties larger than 8."
+                )
+                _sync_summary(result, state)
+                _change_step(result, "error_recovery")
+                return result
+            state["adults"] = adults
             state["cabin_class"] = fields.get("cabin_class", "ECONOMY")
             if trip_type == "round_trip":
                 state["return_date"] = fields.get("return_date")
