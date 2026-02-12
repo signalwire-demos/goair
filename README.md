@@ -6,12 +6,12 @@
 
 <p align="center">
   Voice-powered flight booking built on <a href="https://signalwire.com">SignalWire</a>.<br>
-  Callers dial in, speak naturally, and the AI agent — <strong>Voyager</strong> — searches live flights via the Amadeus API, compares options, confirms pricing, books trips, and sends SMS confirmations. All by voice.
+  Callers dial in, speak naturally, and the AI agent — <strong>Voyager</strong> — searches flights, compares options, confirms pricing, books trips, and sends SMS confirmations. All by voice.
 </p>
 
 ## How It Works
 
-A caller dials a SignalWire phone number. Voyager answers, recognizes returning passengers by caller ID, and walks them through the entire booking flow conversationally. New callers set up a profile first (name, DOB, preferences, home airport), then book. Returning callers skip straight to "Where are you flying?"
+A caller dials a SignalWire phone number. Voyager answers, recognizes returning passengers by caller ID, and walks them through the entire booking flow conversationally. New callers set up a profile first via the `info_gatherer` skill — it sequences questions automatically without per-field state-machine steps. Returning callers skip straight to "Where are you flying?"
 
 ```
                           Caller dials in
@@ -23,10 +23,20 @@ A caller dials a SignalWire phone number. Voyager answers, recognizes returning 
                          │           │
                          v           v
                       Greeting    Greeting
-                    (welcome!)   (by name)
+                    (welcome +    (by name)
+                  start profile)     │
                          │           │
                          v           │
-                   Setup Profile     │
+                   collect_profile   │
+                   (info_gatherer    │
+                    skill: profile)  │
+                         │           │
+                  resolve_location   │
+                  (mode=verify for   │
+                   home airport)     │
+                         │           │
+                    finalize_profile │
+                   (extracts IATA)   │
                          │           │
                          └─────┬─────┘
                                v
@@ -44,8 +54,21 @@ A caller dials a SignalWire phone number. Voyager answers, recognizes returning 
          │               │         │               │
          │               │         └─────┬─────────┘
          │               │               v
-         │               │       Collect Dates &
-         │               │         Passengers
+         │               │        Collect Trip Type
+         │               │          (select_trip_type)
+         │               │               │
+         │               │          ┌────┴────┐
+         │               │     round-trip?  one-way?
+         │               │          │         │
+         │               │          v         v
+         │               │   collect_booking  collect_booking
+         │               │     _roundtrip       _oneway
+         │               │   (info_gatherer   (info_gatherer
+         │               │    skill)           skill)
+         │               │          │         │
+         │               │          └────┬────┘
+         │               │               v
+         │               │        finalize_booking
          │               │               │
          │               │               v
          │               │        Search Flights ──────┐
@@ -56,17 +79,9 @@ A caller dials a SignalWire phone number. Voyager answers, recognizes returning 
          │               │               v             │
          │               │        Confirm Price        │
          │               │               │             │
-         │               │         ┌─────┴─────┐       │
-         │               │    (profile)    (no profile)│
-         │               │         │           │       │
-         │               │         v           v       │
-         │               │   Create       Collect Pax  │
-         │               │   Booking        Info       │
-         │               │         │           │       │
-         │               │         │     Create Booking│
-         │               │         │           │       │
-         │               │         └─────┬─────┘       │
          │               │               v             │
+         │               │        Create Booking       │
+         │               │               │             │
          │               │           Wrap Up           │
          │               │                             │
          │               │      Error Recovery  <──────┘
@@ -91,29 +106,51 @@ A caller dials a SignalWire phone number. Voyager answers, recognizes returning 
                         ┌───────────────────────┼─────────────────┐
                         │                       │                 │
                   ┌─────▼──────┐        ┌───────▼───────┐   ┌─────▼──────┐
-                  │  Amadeus   │        │  Google Maps  │   │   SQLite   │
-                  │  Python SDK│        │  Geocoding    │   │  State DB  │
+                  │  Mock      │        │  Google Maps  │   │   SQLite   │
+                  │ Flight API │        │  Geocoding    │   │  State DB  │
                   └────────────┘        └───────────────┘   └────────────┘
 ```
 
 | Component | Purpose |
 |-----------|---------|
-| **voyager.py** | Main agent — state machine, SWAIG tools, per-call config |
+| **voyager.py** | Main agent — state machine, SWAIG tools, info_gatherer skills, per-call config |
+| **mock_flight_api.py** | Mock flight API — Amadeus-compatible response shapes with realistic data generation |
 | **state_store.py** | SQLite persistence for call state, bookings, and passenger profiles |
 | **config.py** | Environment variable loader and validation |
 | **web/** | Static dashboard — booking table, stats, click-to-call |
 
 ## Features
 
+### Mock Flight API
+
+The mock API (`mock_flight_api.py`) is a drop-in replacement for the Amadeus Self-Service SDK. It generates realistic flight data on the fly from a built-in database of 150+ airports and 28 airlines.
+
+**Response shapes match the Amadeus JSON API exactly:**
+- `mock_search_airports` — matches `GET /v1/reference-data/locations` (keyword search)
+- `mock_nearest_airports` — matches `GET /v1/reference-data/locations/airports` (proximity search)
+- `mock_search_flights` — matches `GET /v2/shopping/flight-offers` (flight search with up to 3 options)
+- `mock_price_offer` — matches `POST /v1/shopping/flight-offers/pricing` (fare lock with 1-3% price bump)
+- `mock_create_order` — matches `POST /v1/booking/flight-orders` (PNR creation)
+
+**Realistic behavior:**
+- Prices are distance-based with cabin multipliers, time-of-day adjustments, and random variance
+- Route-aware airline selection (hub carriers preferred)
+- Geographically reasonable connection hubs for 1-stop flights
+- Timezone-correct departure/arrival times
+- Randomized delays (1-9 seconds per call) simulate real Amadeus/GDS latency when `MOCK_DELAYS=true`
+
+Set `MOCK_DELAYS=true` in your environment to enable the delays. They are **off by default** for fast development.
+
 ### Passenger Profiles
 - Passengers are identified by caller ID (phone number)
 - First-time callers go through a one-time profile setup: name, email, DOB, gender, seat preference, cabin preference, home airport
+- Profile questions are handled by the `info_gatherer` skill (prefix: `profile`) — it sequences questions automatically with built-in confirmation support
 - Returning callers are greeted by name — profile data pre-fills everything
 - Profiles are stored in SQLite and persist across calls
-- Home airport is stored as a name during registration; IATA resolution happens via `resolve_location` when booking (with proper disambiguation for ambiguous cities)
+- Home airport is resolved to an IATA code during profile setup via `resolve_location(mode='verify')` — the resolved name and code are stored as `"Airport Name (IATA)"` and the IATA code is extracted by `finalize_profile`
 
 ### State Machine
-Voyager uses a strict state machine with 13 steps. Each step has:
+Voyager uses a strict state machine with 15 steps. Each step has:
 - **Task** — what the AI does in this step
 - **Process** — step-by-step instructions
 - **Functions** — which SWAIG tools are available (all others are disabled)
@@ -121,23 +158,23 @@ Voyager uses a strict state machine with 13 steps. Each step has:
 
 This prevents the AI from jumping ahead, skipping steps, or calling tools out of order.
 
+Profile and booking data collection uses the `info_gatherer` skill (three instances with prefixes `profile`, `oneway`, `roundtrip`). All instances use `skip_prompt: True` to suppress the skill's default POM section — the conversation flow is managed entirely by step-level instructions. Each instance declares its questions as config — the skill handles sequencing, confirmation prompts, and answer storage in `global_data`. Bridge handlers (`finalize_profile`, `finalize_booking`) fire after each skill completes to validate, persist to SQLite, and transition to the next phase.
+
 ### Per-Call Dynamic Config
 The `_per_call_config` callback runs before each request. The SDK creates an ephemeral copy of the agent — mutations never leak between calls. The callback:
 - Looks up the passenger by phone number
-- Sets `global_data` with the passenger profile (or marks as new caller)
-- Modifies the state machine: returning callers skip `setup_profile`, new callers are forced through it
+- Merges caller data into `global_data` (using `update_global_data` to preserve skill state)
+- Modifies the state machine: returning callers skip `collect_profile` and go to `get_origin`; new callers start in `greeting` with `profile_start_questions` available so the profile flow begins immediately
+- A server-side guardrail forces `resolve_location` to `mode='verify'` during profile collection (when `is_new_caller=True` and no profile exists yet)
 
-### Booking Flow (Amadeus)
-1. **Search** — `GET /v2/shopping/flight-offers` — returns up to 3 options
-2. **Price** — `POST /v1/shopping/flight-offers/pricing` — locks the fare
-3. **Fresh Search + Match + Price** — at booking time, a fresh search gets current GDS segment times, the original flight is matched by carrier+flight numbers, then re-priced
-4. **Book** — `POST /v1/booking/flight-orders` — creates the PNR immediately after fresh pricing
-5. **SMS** — booking confirmation is sent via `result.send_sms()` directly from the booking tool
-
-The fresh-search-before-booking pattern prevents `SEGMENT SELL FAILURE` errors caused by stale segment departure/arrival times (the pricing API echoes back input times, it does not refresh them from the GDS schedule).
+### Booking Flow
+1. **Search** — `search_flights` uses the mock API to return up to 3 options with voice-friendly summaries
+2. **Price** — `get_flight_price` confirms the live fare (mock adds 1-3% variance)
+3. **Book** — `book_flight` creates the PNR using passenger profile from `global_data`
+4. **SMS** — booking confirmation is sent via `result.send_sms()` directly from the booking tool
 
 ### Data Architecture
-- **Heavy Amadeus JSON** (flight offers, priced offers) — stored in SQLite `call_state` table, keyed by `call_id`
+- **Flight JSON** (flight offers, priced offers) — stored in SQLite `call_state` table, keyed by `call_id`
 - **Lightweight AI context** — `build_ai_summary()` extracts only what the AI needs (booleans, text summaries) into `global_data`, keeping it under ~1KB
 - **Passenger profiles** — stored in SQLite `passengers` table, loaded into `global_data` per-call
 - **Bookings** — persisted to SQLite `bookings` table for the dashboard
@@ -153,36 +190,38 @@ A single-page web dashboard at `/` shows all bookings with:
 
 | Step | Functions | Next Steps | Purpose |
 |------|-----------|------------|---------|
-| `greeting` | none | `setup_profile`, `get_origin` | Welcome caller, detect new vs returning |
-| `setup_profile` | `register_passenger` | `get_origin` | One-time profile collection for new callers |
+| `greeting` | `profile_start_questions` (new) / none (returning) | `collect_profile` (new) / `get_origin` (returning) | Welcome caller, start profile questions for new callers |
+| `collect_profile` | `profile_start_questions`, `profile_submit_answer`, `finalize_profile`, `resolve_location` | `get_origin` | Collect new caller profile via info_gatherer, verify home airport |
 | `get_origin` | `resolve_location` | `disambiguate_origin`, `get_destination` | Resolve departure airport |
 | `disambiguate_origin` | `select_airport` | `get_destination` | Choose between multiple origin airports |
-| `get_destination` | `resolve_location` | `disambiguate_destination`, `collect_dates` | Resolve arrival airport |
-| `disambiguate_destination` | `select_airport` | `collect_dates` | Choose between multiple destination airports |
-| `collect_dates` | `check_cheapest_dates`, `set_travel_dates`, `set_passenger_info` | `search_flights` | Dates, passenger count, and cabin class |
-| `search_flights` | `search_flights` | `present_options`, `error_recovery` | Search Amadeus for flights |
-| `present_options` | `select_flight` | `confirm_price`, `search_flights`, `collect_dates`, `error_recovery` | Read options, caller picks one |
-| `confirm_price` | `get_flight_price` | `create_booking`, `collect_pax`, `present_options` | Confirm live price |
-| `collect_pax` | none | `create_booking` | Collect name/email for new callers only |
+| `get_destination` | `resolve_location` | `disambiguate_destination`, `collect_trip_type` | Resolve arrival airport |
+| `disambiguate_destination` | `select_airport` | `collect_trip_type` | Choose between multiple destination airports |
+| `collect_trip_type` | `select_trip_type` | `collect_booking_oneway`, `collect_booking_roundtrip` | Branch on round-trip vs one-way |
+| `collect_booking_oneway` | `oneway_start_questions`, `oneway_submit_answer`, `finalize_booking` | `search_flights` | Collect one-way booking details via info_gatherer |
+| `collect_booking_roundtrip` | `roundtrip_start_questions`, `roundtrip_submit_answer`, `finalize_booking` | `search_flights` | Collect round-trip booking details via info_gatherer |
+| `search_flights` | `search_flights` | `present_options`, `error_recovery` | Search for flights |
+| `present_options` | `select_flight` | `confirm_price`, `search_flights`, `collect_trip_type`, `error_recovery` | Read options, caller picks one |
+| `confirm_price` | `get_flight_price` | `create_booking`, `present_options` | Confirm live price |
 | `create_booking` | `book_flight` | `wrap_up`, `error_recovery` | Book, send SMS, read PNR |
-| `error_recovery` | `resolve_location`, `search_flights`, `check_cheapest_dates` | `get_origin`, `get_destination`, `collect_dates`, `search_flights`, `present_options` | Handle failures without re-collecting passenger info |
+| `error_recovery` | `resolve_location`, `search_flights` | `get_origin`, `get_destination`, `collect_trip_type`, `search_flights`, `present_options` | Handle failures without re-collecting passenger info |
 | `wrap_up` | none | (end) | Say goodbye |
 
 ## SWAIG Tools
 
 | Tool | Parameters | Purpose |
 |------|-----------|---------|
-| `resolve_location` | `location_text`, `location_type` | Google Maps geocoding + Amadeus keyword/proximity search to resolve spoken locations to IATA codes |
+| `resolve_location` | `location_text`, `location_type`, `mode` | Google Maps geocoding + mock keyword/proximity search to resolve spoken locations to IATA codes. `mode='verify'` returns the result without changing step (used during profile setup); `mode='normal'` (default) writes to call state and advances the step |
 | `select_airport` | `location_type`, `iata_code` | Pick one airport from disambiguation candidates |
-| `register_passenger` | `first_name`, `last_name`, `email`, `date_of_birth`, `gender`, `seat_preference`?, `cabin_preference`?, `home_airport_name`? | Save new passenger profile (home airport stored as name, resolved later via `resolve_location`) |
-| `set_travel_dates` | `departure_date`, `return_date`? | Store confirmed travel dates |
-| `set_passenger_info` | `adults`, `cabin_class` | Store passenger count and cabin preference |
-| `search_flights` | (none) | Search Amadeus using stored state, returns up to 3 voice-friendly summaries |
+| `select_trip_type` | `trip_type` | Record round-trip or one-way, branch to the correct booking flow |
+| `finalize_profile` | (none) | Read info_gatherer answers from `global_data`, create passenger record in SQLite, populate `global_data.passenger_profile` |
+| `finalize_booking` | (none) | Read info_gatherer answers from `global_data`, store booking details in call state |
+| `search_flights` | (none) | Search using stored state, returns up to 3 voice-friendly summaries |
 | `select_flight` | `option_number` | Lock in the caller's choice (1, 2, or 3) |
-| `get_flight_price` | (none) | Confirm live price via Amadeus pricing API |
-| `book_flight` | `first_name`?, `last_name`?, `email`?, `phone`? | Fresh search + match + price + book + SMS confirmation. Falls back to passenger profile for all parameters |
-| `check_cheapest_dates` | `month`? | Find cheapest travel dates for flexible callers |
+| `get_flight_price` | (none) | Confirm live price via mock pricing API |
+| `book_flight` | (none) | Book flight + SMS confirmation. Uses passenger profile from `global_data` |
 | `summarize_conversation` | `summary` | Post-call summary (called automatically) |
+
+The `info_gatherer` skill also registers its own tools per prefix: `{prefix}_start_questions` and `{prefix}_submit_answer`. These are managed by the skill and called by the AI during profile/booking collection steps.
 
 All tools use `wait_file="/sounds/typing.mp3"` — the SDK resolves the relative path to a full URL using the agent's base URL.
 
@@ -191,7 +230,6 @@ All tools use `wait_file="/sounds/typing.mp3"` — the SDK resolves the relative
 ### Prerequisites
 - Python 3.10+
 - A [SignalWire](https://signalwire.com) account with a phone number
-- [Amadeus Self-Service](https://developers.amadeus.com) API credentials (free sandbox available, production supported)
 - [Google Maps](https://console.cloud.google.com) Geocoding API key
 
 ### Installation
@@ -223,16 +261,14 @@ SWML_BASIC_AUTH_USER=user
 SWML_BASIC_AUTH_PASSWORD=pass
 SWML_PROXY_URL_BASE=https://your-public-url.ngrok.io
 
-# Amadeus Self-Service
-AMADEUS_CLIENT_ID=your-amadeus-key
-AMADEUS_CLIENT_SECRET=your-amadeus-secret
-AMADEUS_BASE_URL=https://test.api.amadeus.com   # or https://api.amadeus.com for production
-
 # Google Maps
 GOOGLE_MAPS_API_KEY=your-google-key
 
 # AI Model
 AI_MODEL=gpt-4o-mini
+
+# Mock API — enable randomized delays to simulate Amadeus latency (default: false)
+MOCK_DELAYS=false
 
 # Server
 HOST=0.0.0.0
@@ -256,7 +292,7 @@ The SWML endpoint URL (with auth) is logged on startup. Point your SignalWire ph
 SQLite database (`voyager_state.db`) with three tables:
 
 ### `call_state`
-Stores heavy Amadeus JSON per active call. Cleaned up when the call ends.
+Stores flight JSON per active call. Cleaned up when the call ends.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -272,7 +308,7 @@ Permanent record of all completed bookings (used by the dashboard).
 |--------|------|-------------|
 | `id` | INTEGER PK | Auto-increment |
 | `call_id` | TEXT | Originating call |
-| `pnr` | TEXT | Amadeus PNR code |
+| `pnr` | TEXT | PNR code |
 | `passenger_name` | TEXT | Full name |
 | `email` | TEXT | Email address |
 | `phone` | TEXT | Phone number |
@@ -304,7 +340,8 @@ Persistent passenger profiles keyed by phone number.
 
 ```
 goair/
-├── voyager.py            # Main agent (state machine, tools, per-call config)
+├── voyager.py            # Main agent (state machine, tools, info_gatherer skills, per-call config)
+├── mock_flight_api.py    # Mock flight API (Amadeus-compatible response shapes)
 ├── state_store.py        # SQLite state store (call state, bookings, passengers)
 ├── config.py             # Environment variable loader
 ├── requirements.txt      # Python dependencies
@@ -326,20 +363,19 @@ goair/
 └── calls/                # Saved call data JSON files (auto-created)
 ```
 
-## Amadeus API Notes
+## Mock API vs Live Amadeus
 
-GoAir works with both the Amadeus **test** and **production** environments. Set `AMADEUS_BASE_URL` accordingly:
+The mock API is designed as a drop-in replacement. To switch to live Amadeus, replace the imports in `voyager.py`:
 
-| Environment | Base URL | Notes |
-|-------------|----------|-------|
-| Test (sandbox) | `https://test.api.amadeus.com` | Free, limited inventory, no real bookings |
-| Production | `https://api.amadeus.com` | Live inventory, real PNRs, requires approved account |
+```python
+# Current (mock)
+from mock_flight_api import mock_search_airports, ...
 
-### Sandbox-specific considerations
-- The sandbox uses a copy of real airline inventory. Heavy test usage can exhaust seats on popular routes, causing `SEGMENT SELL FAILURE` (error 34651).
-- Test with dates 3+ months out and less common routes for best results.
-- Tokens last 30 minutes in both environments. The client auto-refreshes them.
-- The sandbox rate limit is 1 request per 100ms. The client retries on 500 errors with backoff.
+# Live Amadeus (requires amadeus Python SDK + credentials)
+from amadeus_client import search_airports, ...
+```
+
+The mock API covers the same endpoints and returns identical response shapes, so no other code changes are needed.
 
 ## License
 

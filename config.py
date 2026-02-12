@@ -28,6 +28,9 @@ AI_MODEL = os.getenv("AI_MODEL", "claude-sonnet-4-20250514")
 AI_TOP_P = float(os.getenv("AI_TOP_P", "0.5"))
 AI_TEMPERATURE = float(os.getenv("AI_TEMPERATURE", "0.5"))
 
+# Mock API
+MOCK_DELAYS = os.getenv("MOCK_DELAYS", "false").lower() in ("true", "1", "yes")
+
 # Server
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "3000"))
@@ -36,10 +39,6 @@ PORT = int(os.getenv("PORT", "3000"))
 def validate():
     """Validate required configuration is present."""
     missing = []
-    if not AMADEUS_CLIENT_ID:
-        missing.append("AMADEUS_CLIENT_ID")
-    if not AMADEUS_CLIENT_SECRET:
-        missing.append("AMADEUS_CLIENT_SECRET")
     if not GOOGLE_MAPS_API_KEY:
         missing.append("GOOGLE_MAPS_API_KEY")
     if not SIGNALWIRE_PHONE_NUMBER:
