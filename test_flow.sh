@@ -114,13 +114,11 @@ check "Empty text → error" "No location provided"
 
 run --raw --call-id "$CALL_ID" --exec resolve_location --location_text "Tulsa" --location_type origin
 check "Resolve origin (Tulsa) → TUL" "TUL"
-check "  → response mentions get_destination" "get_destination"
-check "  → saves origin" "origin"
+check "  → saved as origin" "origin"
 
 run --raw --call-id "$CALL_ID" --exec resolve_location --location_text "Atlanta" --location_type destination
 check "Resolve destination (Atlanta) → ATL" "ATL"
-check "  → response mentions collect_trip_type" "collect_trip_type"
-check "  → saves destination" "destination"
+check "  → saved as destination" "destination"
 
 run --raw --call-id "${CALL_ID}-disambig" --exec resolve_location --location_text "New York" --location_type origin
 check "Ambiguous city → multiple airports" "Found multiple\|multiple airports"

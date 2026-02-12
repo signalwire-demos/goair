@@ -296,11 +296,10 @@ class VoyagerAgent(AgentBase):
         get_origin.add_bullets("Process", [
             "Ask where they're flying from, then call resolve_location with location_text and location_type='origin'",
             "If caller says an IATA code directly ('I'm flying from LAX'), still call resolve_location to validate it",
-            "After resolve_location returns:",
-            "  Single airport: Read back the airport name and city and ask the caller to confirm",
-            "  Multiple airports: Move to disambiguate_origin",
-            "  No match: Ask the caller to try a different city name or be more specific",
-            "Once the caller confirms, move to get_destination",
+            "After resolve_location returns, tell the caller which airport was found and ask if that's correct",
+            "If they confirm, move to get_destination",
+            "If multiple airports are returned, move to disambiguate_origin",
+            "If no match, ask the caller to try a different city name",
         ])
         # resolve_location is the only available function; empty text guard is in the tool handler
         get_origin.set_step_criteria("Origin airport resolved and confirmed")
@@ -325,10 +324,10 @@ class VoyagerAgent(AgentBase):
         get_destination.add_section("Task", "Collect the arrival city or airport")
         get_destination.add_bullets("Process", [
             "Ask where they're flying to — or if they already said a destination, call resolve_location right away with location_type='destination'",
-            "After resolve_location returns:",
-            "  Single airport: Confirm with caller, then move to collect_trip_type",
-            "  Multiple airports: Move to disambiguate_destination",
-            "  No match: Ask for clarification",
+            "After resolve_location returns, tell the caller which airport was found and ask if that's correct",
+            "If they confirm, move to collect_trip_type",
+            "If multiple airports are returned, move to disambiguate_destination",
+            "If no match, ask the caller for clarification",
         ])
         # resolve_location is the only available function; valid_steps enforces transitions
         get_destination.set_step_criteria("Destination airport resolved and confirmed")
@@ -363,8 +362,9 @@ class VoyagerAgent(AgentBase):
         collect_booking_oneway = ctx.add_step("collect_booking_oneway")
         collect_booking_oneway.add_section("Task", "Collect one-way booking details")
         collect_booking_oneway.add_bullets("Process", [
-            "Call oneway_start_questions immediately to begin collecting booking details",
-            "Ask each question as instructed, then call oneway_submit_answer with the caller's response",
+            "Call oneway_start_questions immediately — it will return the first question to ask",
+            "Read the question to the caller, then call oneway_submit_answer with their response",
+            "The function will return the next question — repeat until all questions are answered",
             "When all questions are answered, call finalize_booking to prepare the flight search",
         ])
         collect_booking_oneway.set_step_criteria("All booking questions answered and finalize_booking called")
@@ -375,8 +375,9 @@ class VoyagerAgent(AgentBase):
         collect_booking_roundtrip = ctx.add_step("collect_booking_roundtrip")
         collect_booking_roundtrip.add_section("Task", "Collect round-trip booking details")
         collect_booking_roundtrip.add_bullets("Process", [
-            "Call roundtrip_start_questions immediately to begin collecting booking details",
-            "Ask each question as instructed, then call roundtrip_submit_answer with the caller's response",
+            "Call roundtrip_start_questions immediately — it will return the first question to ask",
+            "Read the question to the caller, then call roundtrip_submit_answer with their response",
+            "The function will return the next question — repeat until all questions are answered",
             "When all questions are answered, call finalize_booking to prepare the flight search",
         ])
         collect_booking_roundtrip.set_step_criteria("All booking questions answered and finalize_booking called")
@@ -524,13 +525,10 @@ class VoyagerAgent(AgentBase):
                 get_origin_step.add_bullets("Process", [
                     f"The caller's home airport is {home_airport} — offer this first",
                     f"Say: 'Are you flying from {home_airport} today, or somewhere else?'",
-                    f"If they confirm, call resolve_location with '{home_airport}' and location_type='origin'",
+                    f"If they confirm, call resolve_location with '{home_airport}' and location_type='origin' — the caller already confirmed, so move straight to get_destination after it saves",
                     "If they want a different airport, ask where and call resolve_location with their answer",
-                    "After resolve_location returns:",
-                    "  Single airport: Read back the airport name and city and ask the caller to confirm",
-                    "  Multiple airports: Move to disambiguate_origin",
-                    "  No match: Ask the caller to try a different city name or be more specific",
-                    "Once the caller confirms, move to get_destination",
+                    "After resolve_location returns for a non-home airport, tell the caller which airport was found and ask if that's correct",
+                    "If they confirm, move to get_destination",
                 ])
 
             agent.prompt_add_section("Passenger Profile", "${global_data.passenger_profile}")
@@ -747,9 +745,7 @@ class VoyagerAgent(AgentBase):
                 result = SwaigFunctionResult(
                     f"The closest major airport is {top['name']} ({top['iata']})"
                     f"{' in ' + top['city'] if top['city'] else ''}. "
-                    "Confirm with the caller that this is correct. "
-                    f"If they confirm, move to {next_step}. "
-                    "If not, ask for a different city and call resolve_location again."
+                    f"Saved as {location_type}."
                 )
                 result.add_dynamic_hints([h for h in [top["name"], top["city"]] if h])
                 save_call_state(call_id, state)
@@ -849,14 +845,12 @@ class VoyagerAgent(AgentBase):
 
             next_step = "get_destination" if location_type == "origin" else "collect_trip_type"
             result = SwaigFunctionResult(
-                f"{selected['name']} ({selected['iata']}) selected as {location_type}. "
-                "Confirm with the caller. "
-                f"If they confirm, move to {next_step}. "
-                "If not, ask which airport they prefer and call select_airport again."
+                f"{selected['name']} ({selected['iata']}) selected as {location_type}."
             )
             result.add_dynamic_hints([h for h in [selected["name"], selected["city"]] if h])
             save_call_state(call_id, state)
             _sync_summary(result, state)
+            _change_step(result, next_step)
             return result
 
         # 3. SELECT TRIP TYPE
