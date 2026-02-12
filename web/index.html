@@ -371,6 +371,23 @@
             return Math.floor(diff / 86400) + 'd ago';
         }
 
+        function maskName(name) {
+            if (!name || name === '-') return '-';
+            return name.split(' ').map(part =>
+                part.charAt(0) + '*'.repeat(Math.max(part.length - 1, 0))
+            ).join(' ');
+        }
+
+        function maskEmail(email) {
+            if (!email) return '';
+            const [local, domain] = email.split('@');
+            if (!domain) return email.charAt(0) + '****';
+            const [domName, ...tld] = domain.split('.');
+            const maskedLocal = local.charAt(0) + '*'.repeat(Math.max(local.length - 1, 0));
+            const maskedDomain = domName.charAt(0) + '*'.repeat(Math.max(domName.length - 1, 0));
+            return maskedLocal + '@' + maskedDomain + '.' + tld.join('.');
+        }
+
         function fmtTime(isoStr) {
             if (!isoStr) return '';
             const d = new Date(isoStr);
@@ -435,7 +452,7 @@
             tbody.innerHTML = filtered.map(b => `
                 <tr>
                     <td class="pnr">${b.pnr || '-'}</td>
-                    <td><strong>${b.passenger_name || '-'}</strong><br><span class="time-ago">${b.email || ''}</span></td>
+                    <td><strong>${maskName(b.passenger_name) || '-'}</strong><br><span class="time-ago">${maskEmail(b.email)}</span></td>
                     <td class="flight-col">${renderLegs(b)}</td>
                     <td>${b.departure_date || '-'}${b.return_date ? '<br><span class="time-ago">ret ' + b.return_date + '</span>' : ''}</td>
                     <td><span class="cabin">${(b.cabin_class || 'economy').toLowerCase().replace('_', ' ')}</span></td>
