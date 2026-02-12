@@ -13,6 +13,9 @@ AGENT="voyager.py"
 PASS=0
 FAIL=0
 CALL_ID="test-$(date +%s)"
+DEP_DATE=$(date -v+30d +%Y-%m-%d)
+RET_DATE=$(date -v+45d +%Y-%m-%d)
+PAST_DATE=$(date -v-30d +%Y-%m-%d)
 DEBUG=false
 
 # Parse flags
@@ -243,18 +246,42 @@ check "Trip type (round-trip) saved" "round.trip\|Round.trip"
 check "  → change_step: collect_booking_roundtrip" "collect_booking_roundtrip"
 
 # finalize_booking — one-way with pre-populated answers
-ONEWAY_ANSWERS='{"global_data":{"skill:oneway":{"answers":[{"key_name":"departure_date","answer":"2026-10-01"},{"key_name":"adults","answer":"1"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
+ONEWAY_ANSWERS='{"global_data":{"skill:oneway":{"answers":[{"key_name":"departure_date","answer":"'"$DEP_DATE"'"},{"key_name":"adults","answer":"1"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
 run --raw --call-id "$CALL_ID" --custom-data "$ONEWAY_ANSWERS" --exec finalize_booking
 check "Booking details saved" "Booking details saved\|searching"
 check "  → change_step: search_flights" "search_flights"
 
 # finalize_booking — round-trip
-ROUNDTRIP_ANSWERS='{"global_data":{"skill:roundtrip":{"answers":[{"key_name":"departure_date","answer":"2026-10-01"},{"key_name":"return_date","answer":"2026-10-08"},{"key_name":"adults","answer":"2"},{"key_name":"cabin_class","answer":"BUSINESS"}]}}}'
+ROUNDTRIP_ANSWERS='{"global_data":{"skill:roundtrip":{"answers":[{"key_name":"departure_date","answer":"'"$DEP_DATE"'"},{"key_name":"return_date","answer":"'"$RET_DATE"'"},{"key_name":"adults","answer":"2"},{"key_name":"cabin_class","answer":"BUSINESS"}]}}}'
 run --raw --call-id "${CALL_ID}-rt2" --custom-data "$ROUNDTRIP_ANSWERS" --exec finalize_booking
 check "Round-trip booking saved" "Booking details saved\|searching"
 
+# finalize_booking — past departure date rejected
+PAST_DEP='{"global_data":{"skill:oneway":{"answers":[{"key_name":"departure_date","answer":"'"$PAST_DATE"'"},{"key_name":"adults","answer":"1"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
+run --raw --call-id "${CALL_ID}-pastdep" --exec resolve_location --location_text Tulsa --location_type origin
+run --raw --call-id "${CALL_ID}-pastdep" --exec resolve_location --location_text Atlanta --location_type destination
+run --raw --call-id "${CALL_ID}-pastdep" --exec select_trip_type --trip_type one_way
+run --raw --call-id "${CALL_ID}-pastdep" --custom-data "$PAST_DEP" --exec finalize_booking
+check "Past departure date → rejected" "in the past"
+
+# finalize_booking — past return date rejected
+PAST_RET='{"global_data":{"skill:roundtrip":{"answers":[{"key_name":"departure_date","answer":"'"$DEP_DATE"'"},{"key_name":"return_date","answer":"'"$PAST_DATE"'"},{"key_name":"adults","answer":"1"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
+run --raw --call-id "${CALL_ID}-pastret" --exec resolve_location --location_text Tulsa --location_type origin
+run --raw --call-id "${CALL_ID}-pastret" --exec resolve_location --location_text Atlanta --location_type destination
+run --raw --call-id "${CALL_ID}-pastret" --exec select_trip_type --trip_type round_trip
+run --raw --call-id "${CALL_ID}-pastret" --custom-data "$PAST_RET" --exec finalize_booking
+check "Past return date → rejected" "in the past"
+
+# finalize_booking — return before departure rejected
+BAD_ORDER='{"global_data":{"skill:roundtrip":{"answers":[{"key_name":"departure_date","answer":"'"$RET_DATE"'"},{"key_name":"return_date","answer":"'"$DEP_DATE"'"},{"key_name":"adults","answer":"1"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
+run --raw --call-id "${CALL_ID}-badord" --exec resolve_location --location_text Tulsa --location_type origin
+run --raw --call-id "${CALL_ID}-badord" --exec resolve_location --location_text Atlanta --location_type destination
+run --raw --call-id "${CALL_ID}-badord" --exec select_trip_type --trip_type round_trip
+run --raw --call-id "${CALL_ID}-badord" --custom-data "$BAD_ORDER" --exec finalize_booking
+check "Return before departure → rejected" "must be after"
+
 # finalize_booking — >8 adults rejected
-OVER8_ANSWERS='{"global_data":{"skill:oneway":{"answers":[{"key_name":"departure_date","answer":"2026-10-01"},{"key_name":"adults","answer":"10"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
+OVER8_ANSWERS='{"global_data":{"skill:oneway":{"answers":[{"key_name":"departure_date","answer":"'"$DEP_DATE"'"},{"key_name":"adults","answer":"10"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
 run --raw --call-id "${CALL_ID}-over8" --exec resolve_location --location_text Tulsa --location_type origin
 run --raw --call-id "${CALL_ID}-over8" --exec resolve_location --location_text Atlanta --location_type destination
 run --raw --call-id "${CALL_ID}-over8" --exec select_trip_type --trip_type one_way
@@ -262,7 +289,7 @@ run --raw --call-id "${CALL_ID}-over8" --custom-data "$OVER8_ANSWERS" --exec fin
 check ">8 passengers rejected" "travel agent\|8 passengers"
 
 # finalize_booking — non-numeric adults defaults to 1
-BAD_ADULTS='{"global_data":{"skill:oneway":{"answers":[{"key_name":"departure_date","answer":"2026-10-01"},{"key_name":"adults","answer":"two"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
+BAD_ADULTS='{"global_data":{"skill:oneway":{"answers":[{"key_name":"departure_date","answer":"'"$DEP_DATE"'"},{"key_name":"adults","answer":"two"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
 run --raw --call-id "${CALL_ID}-badnum" --exec resolve_location --location_text Tulsa --location_type origin
 run --raw --call-id "${CALL_ID}-badnum" --exec resolve_location --location_text Atlanta --location_type destination
 run --raw --call-id "${CALL_ID}-badnum" --exec select_trip_type --trip_type one_way
@@ -299,7 +326,7 @@ run_and_merge --raw --call-id "${CALL_ID}-igb" --exec oneway_start_questions
 check "start_questions → asks departure" "depart"
 
 # departure_date WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-igb" --exec oneway_submit_answer --answer "2026-10-01" --confirmed true
+run_and_merge --raw --call-id "${CALL_ID}-igb" --exec oneway_submit_answer --answer "$DEP_DATE" --confirmed true
 check "departure_date → advances to passengers" "passenger\|how many"
 
 # adults
@@ -345,11 +372,11 @@ run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_start_questions
 check "start_questions → asks departure" "depart"
 
 # departure_date WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "2026-10-01" --confirmed true
+run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "$DEP_DATE" --confirmed true
 check "departure_date → advances to return" "return"
 
 # return_date WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "2026-10-08" --confirmed true
+run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "$RET_DATE" --confirmed true
 check "return_date → advances to passengers" "passenger\|how many"
 
 # adults
@@ -386,7 +413,7 @@ check "No dates → collect_trip_type" "dates\|collect_trip_type"
 section "6. search_flights — actual search"
 # =============================================================================
 
-# Main CALL_ID has: TUL→ATL, 2026-10-01, 1 adult, ECONOMY
+# Main CALL_ID has: TUL→ATL, $DEP_DATE, 1 adult, ECONOMY
 run --raw --call-id "$CALL_ID" --exec search_flights
 check "Search TUL→ATL returns results" "option\|Option\|found"
 check "  → change_step: present_options" "present_options"

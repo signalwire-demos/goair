@@ -6,6 +6,7 @@ import sys
 import json
 import logging
 import re
+from datetime import date
 from pathlib import Path
 from dotenv import load_dotenv
 from signalwire_agents import AgentBase, AgentServer
@@ -987,7 +988,59 @@ class VoyagerAgent(AgentBase):
                 if a.get("key_name") and a.get("answer")
             }
 
-            state["departure_date"] = fields.get("departure_date")
+            # Validate departure date
+            departure_str = fields.get("departure_date", "")
+            try:
+                departure_dt = date.fromisoformat(departure_str)
+            except (ValueError, TypeError):
+                result = SwaigFunctionResult(
+                    f"Invalid departure date '{departure_str}'. "
+                    "Must be in YYYY-MM-DD format. Ask the caller again."
+                )
+                _sync_summary(result, state)
+                _change_step(result, "collect_booking_oneway" if trip_type == "one_way" else "collect_booking_roundtrip")
+                return result
+            if departure_dt < date.today():
+                result = SwaigFunctionResult(
+                    f"The departure date {departure_str} is in the past. "
+                    "Ask the caller for a future departure date."
+                )
+                _sync_summary(result, state)
+                _change_step(result, "collect_booking_oneway" if trip_type == "one_way" else "collect_booking_roundtrip")
+                return result
+            state["departure_date"] = departure_str
+
+            # Validate return date for round trips
+            if trip_type == "round_trip":
+                return_str = fields.get("return_date", "")
+                try:
+                    return_dt = date.fromisoformat(return_str)
+                except (ValueError, TypeError):
+                    result = SwaigFunctionResult(
+                        f"Invalid return date '{return_str}'. "
+                        "Must be in YYYY-MM-DD format. Ask the caller again."
+                    )
+                    _sync_summary(result, state)
+                    _change_step(result, "collect_booking_roundtrip")
+                    return result
+                if return_dt < date.today():
+                    result = SwaigFunctionResult(
+                        f"The return date {return_str} is in the past. "
+                        "Ask the caller for a future return date."
+                    )
+                    _sync_summary(result, state)
+                    _change_step(result, "collect_booking_roundtrip")
+                    return result
+                if return_dt <= departure_dt:
+                    result = SwaigFunctionResult(
+                        f"The return date {return_str} must be after the departure date {departure_str}. "
+                        "Ask the caller for the correct return date."
+                    )
+                    _sync_summary(result, state)
+                    _change_step(result, "collect_booking_roundtrip")
+                    return result
+                state["return_date"] = return_str
+
             try:
                 adults = int(fields.get("adults", "1"))
             except (ValueError, TypeError):
@@ -1003,8 +1056,6 @@ class VoyagerAgent(AgentBase):
                 return result
             state["adults"] = adults
             state["cabin_class"] = fields.get("cabin_class", "ECONOMY")
-            if trip_type == "round_trip":
-                state["return_date"] = fields.get("return_date")
 
             save_call_state(call_id, state)
 
