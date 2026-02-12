@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS bookings (
     cabin_class      TEXT,
     price            TEXT,
     currency         TEXT DEFAULT 'USD',
+    legs_json        TEXT,
     status           TEXT NOT NULL DEFAULT 'confirmed'
                      CHECK(status IN ('confirmed','completed','cancelled')),
     created_at       TEXT NOT NULL DEFAULT (datetime('now'))
@@ -85,6 +86,12 @@ def _connect():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_CREATE_TABLES)
+    # Migration: add legs_json to existing databases that lack it
+    try:
+        conn.execute("ALTER TABLE bookings ADD COLUMN legs_json TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     return conn
 
 
@@ -206,7 +213,8 @@ def build_ai_summary(state):
 
 def save_booking(call_id, pnr, passenger_name, email, phone,
                  origin_iata, origin_name, destination_iata, destination_name,
-                 departure_date, return_date, cabin_class, price, currency="USD"):
+                 departure_date, return_date, cabin_class, price, currency="USD",
+                 legs_json=None):
     """Insert a completed booking record."""
     conn = _connect()
     try:
@@ -214,11 +222,13 @@ def save_booking(call_id, pnr, passenger_name, email, phone,
             """INSERT INTO bookings
                (call_id, pnr, passenger_name, email, phone,
                 origin_iata, origin_name, destination_iata, destination_name,
-                departure_date, return_date, cabin_class, price, currency)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                departure_date, return_date, cabin_class, price, currency,
+                legs_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (call_id, pnr, passenger_name, email, phone,
              origin_iata, origin_name, destination_iata, destination_name,
-             departure_date, return_date, cabin_class, price, currency),
+             departure_date, return_date, cabin_class, price, currency,
+             legs_json),
         )
         conn.commit()
         logger.info(f"Saved booking PNR={pnr} for call_id={call_id}")
@@ -233,7 +243,13 @@ def get_all_bookings():
         rows = conn.execute(
             "SELECT * FROM bookings ORDER BY created_at DESC"
         ).fetchall()
-        return [dict(r) for r in rows]
+        bookings = [dict(r) for r in rows]
+        for b in bookings:
+            if b.get("legs_json"):
+                b["legs"] = json.loads(b["legs_json"])
+            else:
+                b["legs"] = []
+        return bookings
     finally:
         conn.close()
 

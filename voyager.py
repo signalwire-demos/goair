@@ -12,7 +12,13 @@ from signalwire_agents import AgentBase, AgentServer
 from signalwire_agents.core.function_result import SwaigFunctionResult
 
 import config
-from amadeus import Client as AmadeusSDK, ResponseError, Location
+from mock_flight_api import (
+    mock_search_airports,
+    mock_nearest_airports,
+    mock_search_flights,
+    mock_price_offer,
+    mock_create_order,
+)
 from state_store import (
     load_call_state, save_call_state, delete_call_state,
     cleanup_stale_states, build_ai_summary, save_booking, get_all_bookings,
@@ -24,164 +30,44 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, force=True)
 logger = logging.getLogger(__name__)
 
-# Initialize Amadeus SDK (handles OAuth2 + content-type automatically)
-amadeus = AmadeusSDK(
-    client_id=config.AMADEUS_CLIENT_ID,
-    client_secret=config.AMADEUS_CLIENT_SECRET,
-    hostname='test' if 'test' in config.AMADEUS_BASE_URL else 'production',
-)
 config.validate()
 
 
-# ── Amadeus SDK helpers (thin wrappers for error handling) ──────────────
+# ── Mock API aliases ─────────────────────────────────────────────────
 
-def _log_amadeus_error(context, exc):
-    """Extract and log full error details from an SDK ResponseError.
-
-    The SDK's error formatting swallows details when source lacks 'parameter',
-    and its JSON parser can fail if Content-Type includes charset. We parse
-    the raw body as a fallback.
-    """
-    import json as _json
-    try:
-        result = exc.response.result
-        if not result and exc.response.body:
-            result = _json.loads(exc.response.body)
-        if result:
-            for err in result.get('errors', []):
-                logger.error(
-                    f"Amadeus {context} {exc.response.status_code}: "
-                    f"[{err.get('code')}] {err.get('title', '')} - "
-                    f"{err.get('detail', '')} (source: {err.get('source', {})})"
-                )
-            return
-    except Exception:
-        pass
-    logger.error(f"Amadeus {context} failed: {exc}")
+_search_airports = mock_search_airports
+_nearest_airports = mock_nearest_airports
+_search_flights = mock_search_flights
+_price_offer = mock_price_offer
+_create_order = mock_create_order
 
 
-def _search_airports(keyword):
-    """Search airports/cities by keyword. Returns list of location dicts."""
-    try:
-        return amadeus.reference_data.locations.get(
-            keyword=keyword, subType=Location.ANY,
-        ).data
-    except ResponseError as e:
-        logger.error(f"Airport search failed for '{keyword}': {e}")
-        return []
+def _extract_segments(offer):
+    """Extract carrier+flight-number identifiers for segment matching."""
+    segs = []
+    for itin in offer.get("itineraries", []):
+        for seg in itin.get("segments", []):
+            segs.append(f"{seg.get('carrierCode', '')}{seg.get('number', '')}")
+    return segs
 
 
-def _nearest_airports(lat, lng):
-    """Find nearest airports by coordinates. Returns list of location dicts."""
-    try:
-        return amadeus.reference_data.locations.airports.get(
-            latitude=lat, longitude=lng, radius=100, sort='relevance',
-        ).data
-    except ResponseError as e:
-        logger.error(f"Nearest airport search failed: {e}")
-        return []
+def _extract_baggage(priced_offer):
+    """Extract baggage info from a priced offer's travelerPricings."""
+    tp = priced_offer.get("travelerPricings", [])
+    if not tp:
+        return ""
+    segs = tp[0].get("fareDetailsBySegment", [])
+    if not segs:
+        return ""
+    bags = segs[0].get("includedCheckedBags", {})
+    qty = bags.get("quantity", 0)
+    weight = bags.get("weight")
+    if qty:
+        return f"{qty} checked bag{'s' if qty > 1 else ''} included. "
+    elif weight:
+        return f"Checked bags up to {weight}kg included. "
+    return "Carry-on only, checked bags extra. "
 
-
-def _search_flights(origin, destination, departure_date, return_date=None,
-                    adults=1, cabin_class="ECONOMY", max_results=5):
-    """Search flight offers. Returns (offers, dictionaries, actual_cabin)."""
-    params = {
-        'originLocationCode': origin,
-        'destinationLocationCode': destination,
-        'departureDate': departure_date,
-        'adults': adults,
-        'travelClass': cabin_class,
-        'max': max_results,
-        'currencyCode': 'USD',
-    }
-    if return_date:
-        params['returnDate'] = return_date
-    try:
-        response = amadeus.shopping.flight_offers_search.get(**params)
-        return response.data, response.result.get('dictionaries', {}), cabin_class
-    except ResponseError as e:
-        logger.error(f"Flight search failed for {cabin_class}: {e}")
-        if cabin_class != "ECONOMY":
-            logger.info(f"Retrying search with ECONOMY (was {cabin_class})")
-            params['travelClass'] = 'ECONOMY'
-            try:
-                response = amadeus.shopping.flight_offers_search.get(**params)
-                return response.data, response.result.get('dictionaries', {}), 'ECONOMY'
-            except ResponseError as e2:
-                logger.error(f"Flight search ECONOMY retry also failed: {e2}")
-        return [], {}, cabin_class
-
-
-def _price_offer(offer):
-    """Confirm live price on a flight offer. Returns pricing data dict or None."""
-    try:
-        return amadeus.shopping.flight_offers.pricing.post(offer).data
-    except ResponseError as e:
-        _log_amadeus_error("pricing", e)
-        return None
-
-
-def _create_order(offer, travelers):
-    """Create a flight booking. Returns order data dict or None."""
-    contacts = []
-    if travelers:
-        t0 = travelers[0]
-        contact = t0.get("contact", {})
-        name = t0.get("name", {})
-        contact_entry = {
-            "addresseeName": {
-                "firstName": name.get("firstName", ""),
-                "lastName": name.get("lastName", ""),
-            },
-            "purpose": "STANDARD",
-            "address": {
-                "lines": ["123 Main St"],
-                "postalCode": "00000",
-                "cityName": "New York",
-                "countryCode": "US",
-            },
-        }
-        if contact.get("emailAddress"):
-            contact_entry["emailAddress"] = contact["emailAddress"]
-        if contact.get("phones"):
-            contact_entry["phones"] = contact["phones"]
-        contacts.append(contact_entry)
-
-    try:
-        response = amadeus.post('/v1/booking/flight-orders', {
-            'data': {
-                'type': 'flight-order',
-                'flightOffers': [offer],
-                'travelers': travelers,
-                'contacts': contacts,
-                'ticketingAgreement': {
-                    'option': 'DELAY_TO_CANCEL',
-                    'delay': '6D',
-                },
-                'remarks': {
-                    'general': [
-                        {'subType': 'GENERAL_MISCELLANEOUS', 'text': 'VOYAGER AI BOOKING'}
-                    ]
-                },
-            }
-        })
-        return response.data
-    except ResponseError as e:
-        # SDK swallows error details — parse from raw body if needed
-        _log_amadeus_error("booking", e)
-        return None
-
-
-def _cheapest_dates(origin, destination, departure_date=None):
-    """Find cheapest travel dates. Returns list of date/price entries."""
-    params = {'origin': origin, 'destination': destination}
-    if departure_date:
-        params['departureDate'] = departure_date
-    try:
-        return amadeus.shopping.flight_dates.get(**params).data
-    except ResponseError as e:
-        logger.error(f"Cheapest dates failed: {e}")
-        return []
 
 # NATO phonetic alphabet for PNR readback
 NATO = {
@@ -216,6 +102,23 @@ def format_duration(iso_duration):
     return f"{minutes}m"
 
 
+def format_time_voice(hhmm):
+    """Convert 24-hour HH:MM to voice-friendly 12-hour format.
+
+    Examples: "06:00" → "6 AM", "17:08" → "5:08 PM", "12:00" → "12 PM",
+              "00:30" → "12:30 AM", "13:00" → "1 PM"
+    """
+    try:
+        h, m = int(hhmm[:2]), int(hhmm[3:5])
+        period = "AM" if h < 12 else "PM"
+        h12 = h % 12 or 12
+        if m == 0:
+            return f"{h12} {period}"
+        return f"{h12}:{m:02d} {period}"
+    except (ValueError, IndexError):
+        return hhmm
+
+
 def summarize_offer(offer, index, dictionaries):
     """Summarize a flight offer into a voice-friendly string."""
     try:
@@ -245,9 +148,11 @@ def summarize_offer(offer, index, dictionaries):
             dep_time = first_seg.get("departure", {}).get("at", "")
             arr_time = last_seg.get("arrival", {}).get("at", "")
 
-            # Format times for voice
-            dep_display = dep_time[11:16] if len(dep_time) > 15 else dep_time
-            arr_display = arr_time[11:16] if len(arr_time) > 15 else arr_time
+            # Format times for voice — 12-hour with AM/PM
+            dep_hhmm = dep_time[11:16] if len(dep_time) > 15 else dep_time
+            arr_hhmm = arr_time[11:16] if len(arr_time) > 15 else arr_time
+            dep_display = format_time_voice(dep_hhmm)
+            arr_display = format_time_voice(arr_hhmm)
 
             duration = format_duration(itin.get("duration", ""))
 
@@ -268,23 +173,21 @@ class VoyagerAgent(AgentBase):
 
         # AI model
         self.set_param("ai_model", config.AI_MODEL)
-        self.set_param("end_of_speech_timeout", 600)
-        self.set_prompt_llm_params(top_p=0.3, temperature=1.0)
+        self.set_param("end_of_speech_timeout", 500)
+        self.set_prompt_llm_params(top_p=0.3, temperature=0.3)
 
         # Personality
         self.prompt_add_section("Personality",
             "You are Voyager, a friendly AI travel concierge who helps callers find and book flights. "
-            "Keep it warm and brief — the occasional travel quip is welcome, but efficiency comes first."
+            "Keep it warm and brief — the occasional travel quip is welcome."
         )
 
-        # Hard rules for voice behavior and tool discipline
+        # Voice behavior — only things the model needs for natural speech
         self.prompt_add_section("Rules", body="", bullets=[
             "This is a PHONE CALL. Keep every response to 1-2 short sentences.",
-            "Ask ONE question at a time. Wait for the answer before continuing.",
-            "NEVER make up IATA codes, airport names, flight details, prices, or PNRs. Always use the tools.",
-            "NEVER skip a required tool call. Every airport needs resolve_location. Every price needs get_flight_price.",
-            "Use airline NAMES not codes ('Delta' not 'DL'). Say times naturally ('seven thirty PM' not '19:30').",
+            "Use airline names not codes ('Delta' not 'DL'). Say times naturally ('seven thirty PM' not '19:30').",
             "Spell confirmation codes using the NATO phonetic alphabet.",
+            "Avoid commas in speech — use 'and' or 'or' instead. Keep sentences short and direct.",
         ])
 
         # Voice
@@ -300,6 +203,65 @@ class VoyagerAgent(AgentBase):
         # SWAIG tools
         self._define_tools()
 
+        # info_gatherer skills — declarative question sets replace per-field handlers
+        self.add_skill("info_gatherer", {
+            "prefix": "profile",
+            "skip_prompt": True,
+            "questions": [
+                {"key_name": "first_name", "question_text": "What is your first name?"},
+                {"key_name": "last_name", "question_text": "What is your last name?"},
+                {"key_name": "date_of_birth", "question_text": "What is your date of birth including month day and year?",
+                 "confirm": True,
+                 "prompt_add": "Accept natural language but submit in YYYY-MM-DD format. Must have complete date."},
+                {"key_name": "gender", "question_text": "Are you male or female?",
+                 "prompt_add": "Submit exactly MALE or FEMALE."},
+                {"key_name": "email", "question_text": "What email should we send confirmations to?", "confirm": True},
+                {"key_name": "seat_preference", "question_text": "Do you prefer a window or aisle seat?",
+                 "prompt_add": "Submit exactly WINDOW or AISLE."},
+                {"key_name": "cabin_preference", "question_text": "What cabin class do you usually fly?",
+                 "prompt_add": "Submit exactly ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST."},
+                {"key_name": "home_airport_name", "question_text": "What airport do you usually fly from?",
+                 "confirm": True,
+                 "prompt_add": "After the caller answers, call resolve_location with their answer to resolve it to an IATA code. "
+                               "Submit the answer as 'Airport Name (IATA)' format, e.g. 'San Francisco International (SFO)'. "
+                               "If multiple airports are returned, ask which one they mean before submitting."},
+            ],
+            "completion_message": "Profile complete. Now call finalize_profile to save the passenger record.",
+        })
+
+        self.add_skill("info_gatherer", {
+            "prefix": "oneway",
+            "skip_prompt": True,
+            "questions": [
+                {"key_name": "departure_date", "question_text": "When would you like to depart?",
+                 "confirm": True,
+                 "prompt_add": "Accept natural language but submit in YYYY-MM-DD format."},
+                {"key_name": "adults", "question_text": "How many passengers will be traveling?",
+                 "prompt_add": "Submit as a positive integer (e.g. 1, 2, 3)."},
+                {"key_name": "cabin_class", "question_text": "What cabin class would you like — economy, premium economy, business, or first?",
+                 "prompt_add": "Submit exactly ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST. If the passenger has a stored cabin preference in their profile, suggest it."},
+            ],
+            "completion_message": "Booking details collected. Now call finalize_booking to prepare the flight search.",
+        })
+
+        self.add_skill("info_gatherer", {
+            "prefix": "roundtrip",
+            "skip_prompt": True,
+            "questions": [
+                {"key_name": "departure_date", "question_text": "When would you like to depart?",
+                 "confirm": True,
+                 "prompt_add": "Accept natural language but submit in YYYY-MM-DD format."},
+                {"key_name": "return_date", "question_text": "And when would you like to return?",
+                 "confirm": True,
+                 "prompt_add": "Accept natural language but submit in YYYY-MM-DD format. Must be after departure date."},
+                {"key_name": "adults", "question_text": "How many passengers will be traveling?",
+                 "prompt_add": "Submit as a positive integer (e.g. 1, 2, 3)."},
+                {"key_name": "cabin_class", "question_text": "What cabin class would you like — economy, premium economy, business, or first?",
+                 "prompt_add": "Submit exactly ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST. If the passenger has a stored cabin preference in their profile, suggest it."},
+            ],
+            "completion_message": "Booking details collected. Now call finalize_booking to prepare the flight search.",
+        })
+
         # Per-call dynamic config — SDK creates ephemeral copy per request
         self.set_dynamic_config_callback(self._per_call_config)
 
@@ -308,61 +270,38 @@ class VoyagerAgent(AgentBase):
         contexts = self.define_contexts()
         ctx = contexts.add_context("default")
 
-        # GREETING
+        # GREETING — bare shell; _per_call_config sets Process/criteria per caller type
         greeting = ctx.add_step("greeting")
-        greeting.add_section("Task", "Welcome the caller and determine travel intent")
-        greeting.add_bullets("Process", [
-            "Check ${global_data.is_new_caller}:",
-            "  If RETURNING caller (is_new_caller is false): greet by name using ${global_data.passenger_profile}, ask where they want to fly, move to get_origin",
-            "  If NEW caller: welcome them to Voyager, ask for their first and last name, then move to setup_profile",
-            "If the caller provides origin and/or destination in their first response, note them for the next step",
-        ])
-        greeting.set_step_criteria("Travel intent detected or name collected for new caller")
+        greeting.add_section("Task", "Welcome the caller")
         greeting.set_functions("none")
-        greeting.set_valid_steps(["setup_profile", "get_origin"])
+        greeting.set_valid_steps(["collect_profile", "get_origin"])
 
-        # SETUP PROFILE (new callers only)
-        setup_profile = ctx.add_step("setup_profile")
-        setup_profile.add_section("Task", "Collect profile details for a new passenger")
-        setup_profile.add_bullets("Process", [
-            "The caller has already given their first and last name in the greeting step",
-            "Ask one question at a time in this order:",
-            "  1. Email: 'What is the best email address for booking confirmations?'",
-            "  2. Date of birth: 'What is your date of birth?'",
-            "  3. Gender: 'And should I have you down as male or female?'",
-            "  4. Seat preference: 'Do you prefer a window or aisle seat?'",
-            "  5. Cabin preference: 'Do you usually fly economy, premium economy, business, or first class?'",
-            "  6. Home airport: 'And which airport do you normally fly from?'",
-            "Once you have all answers, call register_passenger with ALL collected details including home_airport_name",
-            "After register_passenger confirms, move to get_origin",
+        # COLLECT PROFILE (replaces 8 profile sub-steps)
+        collect_profile = ctx.add_step("collect_profile")
+        collect_profile.add_section("Task", "Collect the new caller's profile information")
+        collect_profile.add_bullets("Process", [
+            "Call profile_start_questions immediately to begin — do NOT ask if they are ready",
+            "Ask each question as instructed, then call profile_submit_answer with the caller's response",
+            "When the caller answers the home airport question, call resolve_location with their answer to validate it before submitting",
+            "When all questions are answered, call finalize_profile to save the record",
         ])
-        setup_profile.add_bullets("Do NOT", [
-            "Do NOT ask for all details at once — one question at a time",
-            "Do NOT skip calling register_passenger — the profile must be saved",
-        ])
-        setup_profile.set_step_criteria("Profile saved via register_passenger")
-        setup_profile.set_functions(["register_passenger"])
-        setup_profile.set_valid_steps(["get_origin"])
+        collect_profile.set_step_criteria("All profile questions answered and finalize_profile called")
+        collect_profile.set_functions(["profile_start_questions", "profile_submit_answer", "finalize_profile", "resolve_location"])
+        collect_profile.set_valid_steps(["get_origin"])
 
         # GET ORIGIN
         get_origin = ctx.add_step("get_origin")
         get_origin.add_section("Task", "Collect the departure city or airport")
         get_origin.add_bullets("Process", [
-            "Check the passenger profile for a home airport: ${global_data.passenger_profile.home_airport_name}",
-            "  If a home airport is on file: offer it — 'Would you like to fly from [home airport name], or a different airport?'",
-            "  If they confirm the home airport: call resolve_location with the home airport name and location_type='origin'",
-            "  If they want a different airport: ask where they're flying from, then call resolve_location",
-            "If no home airport is on file, or the caller already stated an origin city, call resolve_location with location_text and location_type='origin'",
+            "Ask where they're flying from, then call resolve_location with location_text and location_type='origin'",
             "If caller says an IATA code directly ('I'm flying from LAX'), still call resolve_location to validate it",
             "After resolve_location returns:",
-            "  Single airport: Read back the airport name and city, ask 'Is that right?' If confirmed, move to get_destination",
+            "  Single airport: Read back the airport name and city and ask the caller to confirm",
             "  Multiple airports: Move to disambiguate_origin",
             "  No match: Ask the caller to try a different city name or be more specific",
+            "Once the caller confirms, move to get_destination",
         ])
-        get_origin.add_bullets("Do NOT", [
-            "Do NOT skip calling resolve_location — every airport must be resolved to an IATA code, even the home airport",
-            "Do NOT call resolve_location until the caller has answered — ask first, WAIT for their spoken response, THEN resolve",
-        ])
+        # resolve_location is the only available function; empty text guard is in the tool handler
         get_origin.set_step_criteria("Origin airport resolved and confirmed")
         get_origin.set_functions(["resolve_location"])
         get_origin.set_valid_steps(["disambiguate_origin", "get_destination"])
@@ -371,15 +310,11 @@ class VoyagerAgent(AgentBase):
         disambiguate_origin = ctx.add_step("disambiguate_origin")
         disambiguate_origin.add_section("Task", "Ask the caller to choose between multiple origin airports")
         disambiguate_origin.add_bullets("Process", [
-            "Present the top 2-3 airports by name and city: 'The New York area has JFK, LaGuardia, and Newark. Do you have a preference?'",
-            "When the caller picks one, you MUST call select_airport with location_type='origin' and the IATA code from the candidates",
-            "If the caller says 'any' or 'whichever is cheapest', call select_airport with the first candidate's IATA code",
-            "Do NOT move to the next step until select_airport confirms the selection",
+            "Present the airports by name and city and ask which they prefer",
+            "Call select_airport with location_type='origin' and the chosen IATA code",
+            "If the caller says 'any', call select_airport with the first candidate",
         ])
-        disambiguate_origin.add_bullets("Do NOT", [
-            "Do NOT ask about dates or destinations here",
-            "Do NOT move to get_destination without calling select_airport first",
-        ])
+        # select_airport is the only available function; valid_steps enforces transitions
         disambiguate_origin.set_step_criteria("Origin airport stored via select_airport")
         disambiguate_origin.set_functions(["select_airport"])
         disambiguate_origin.set_valid_steps(["get_destination"])
@@ -388,67 +323,70 @@ class VoyagerAgent(AgentBase):
         get_destination = ctx.add_step("get_destination")
         get_destination.add_section("Task", "Collect the arrival city or airport")
         get_destination.add_bullets("Process", [
-            "If the caller already stated a destination, call resolve_location with location_type='destination'",
+            "Ask where they're flying to — or if they already said a destination, call resolve_location right away with location_type='destination'",
             "After resolve_location returns:",
-            "  Single airport: Confirm with caller, then move to collect_dates",
+            "  Single airport: Confirm with caller, then move to collect_trip_type",
             "  Multiple airports: Move to disambiguate_destination",
             "  No match: Ask for clarification",
         ])
-        get_destination.add_bullets("Do NOT", [
-            "Do NOT discuss dates or fares here",
-            "Do NOT skip resolve_location — every destination must be validated",
-        ])
+        # resolve_location is the only available function; valid_steps enforces transitions
         get_destination.set_step_criteria("Destination airport resolved and confirmed")
         get_destination.set_functions(["resolve_location"])
-        get_destination.set_valid_steps(["disambiguate_destination", "collect_dates"])
+        get_destination.set_valid_steps(["disambiguate_destination", "collect_trip_type"])
 
         # DISAMBIGUATE DESTINATION
         disambiguate_destination = ctx.add_step("disambiguate_destination")
         disambiguate_destination.add_section("Task", "Ask the caller to choose between multiple destination airports")
         disambiguate_destination.add_bullets("Process", [
-            "Present the top 2-3 airports by name: 'London has Heathrow, Gatwick, and Stansted. Any preference?'",
-            "When the caller picks one, you MUST call select_airport with location_type='destination' and the IATA code from the candidates",
-            "If the caller says 'any', call select_airport with the first candidate's IATA code",
-            "Do NOT move to the next step until select_airport confirms the selection",
+            "Present the airports by name and ask which they prefer",
+            "Call select_airport with location_type='destination' and the chosen IATA code",
+            "If the caller says 'any', call select_airport with the first candidate",
         ])
-        disambiguate_destination.add_bullets("Do NOT", [
-            "Do NOT move to collect_dates without calling select_airport first",
-        ])
+        # select_airport is the only available function; valid_steps enforces transitions
         disambiguate_destination.set_step_criteria("Destination airport stored via select_airport")
         disambiguate_destination.set_functions(["select_airport"])
-        disambiguate_destination.set_valid_steps(["collect_dates"])
+        disambiguate_destination.set_valid_steps(["collect_trip_type"])
 
-        # COLLECT DATES & PASSENGERS
-        collect_dates = ctx.add_step("collect_dates")
-        collect_dates.add_section("Task", "Collect travel dates, passenger count, and cabin class")
-        collect_dates.add_bullets("Process", [
-            "Ask: 'When would you like to fly?'",
-            "Handle relative dates: 'next Friday', 'in two weeks', 'mid-March' — resolve to YYYY-MM-DD",
-            "Then ask: 'Is this round-trip or one-way?'",
-            "If round-trip, ask: 'And when would you like to come back?'",
-            "If the caller says 'whenever it's cheapest' or is flexible, call check_cheapest_dates and present the top 3 options",
-            "Once the caller confirms the dates, call set_travel_dates to store them",
-            "After set_travel_dates confirms, ask: 'How many passengers will be traveling?'",
-            "For cabin class, check ${global_data.passenger_profile.cabin_preference}:",
-            "  If set: suggest it — 'Last time you preferred business class. Same again, or would you like something different?'",
-            "  If not set: ask — 'And would you prefer economy, business, or first class?'",
-            "Once both are confirmed, call set_passenger_info to store them",
-            "After set_passenger_info confirms, move to search_flights",
+        # COLLECT TRIP TYPE (simple branch point)
+        collect_trip_type = ctx.add_step("collect_trip_type")
+        collect_trip_type.add_section("Task", "Ask whether this is a round-trip or one-way flight")
+        collect_trip_type.add_bullets("Process", [
+            "Ask: 'Is this a round-trip or one-way?'",
+            "Call select_trip_type with trip_type 'round_trip' or 'one_way'",
         ])
-        collect_dates.add_bullets("Do NOT", [
-            "Do NOT move forward until set_travel_dates has stored the dates",
-            "Do NOT assume 1 passenger — ask explicitly",
-            "Do NOT move to search_flights until set_passenger_info has stored the details",
+        collect_trip_type.set_step_criteria("Trip type selected via select_trip_type")
+        collect_trip_type.set_functions(["select_trip_type"])
+        collect_trip_type.set_valid_steps(["collect_booking_oneway", "collect_booking_roundtrip"])
+
+        # COLLECT BOOKING — ONE-WAY
+        collect_booking_oneway = ctx.add_step("collect_booking_oneway")
+        collect_booking_oneway.add_section("Task", "Collect one-way booking details")
+        collect_booking_oneway.add_bullets("Process", [
+            "Call oneway_start_questions immediately to begin collecting booking details",
+            "Ask each question as instructed, then call oneway_submit_answer with the caller's response",
+            "When all questions are answered, call finalize_booking to prepare the flight search",
         ])
-        collect_dates.set_step_criteria("Dates and passenger info stored")
-        collect_dates.set_functions(["check_cheapest_dates", "set_travel_dates", "set_passenger_info"])
-        collect_dates.set_valid_steps(["search_flights"])
+        collect_booking_oneway.set_step_criteria("All booking questions answered and finalize_booking called")
+        collect_booking_oneway.set_functions(["oneway_start_questions", "oneway_submit_answer", "finalize_booking"])
+        collect_booking_oneway.set_valid_steps(["search_flights"])
+
+        # COLLECT BOOKING — ROUND-TRIP
+        collect_booking_roundtrip = ctx.add_step("collect_booking_roundtrip")
+        collect_booking_roundtrip.add_section("Task", "Collect round-trip booking details")
+        collect_booking_roundtrip.add_bullets("Process", [
+            "Call roundtrip_start_questions immediately to begin collecting booking details",
+            "Ask each question as instructed, then call roundtrip_submit_answer with the caller's response",
+            "When all questions are answered, call finalize_booking to prepare the flight search",
+        ])
+        collect_booking_roundtrip.set_step_criteria("All booking questions answered and finalize_booking called")
+        collect_booking_roundtrip.set_functions(["roundtrip_start_questions", "roundtrip_submit_answer", "finalize_booking"])
+        collect_booking_roundtrip.set_valid_steps(["search_flights"])
 
         # SEARCH FLIGHTS
         search_flights_step = ctx.add_step("search_flights")
         search_flights_step.add_section("Task", "Search for flights and prepare up to 3 options for presentation")
         search_flights_step.add_bullets("Process", [
-            "Call search_flights — it takes no parameters, it reads everything from booking_state automatically",
+            "Call search_flights to find available flights",
             "The function returns up to 3 options pre-summarized for voice",
             "Move to present_options to read them to the caller",
             "If no results: move to error_recovery",
@@ -461,73 +399,43 @@ class VoyagerAgent(AgentBase):
         present_options = ctx.add_step("present_options")
         present_options.add_section("Task", "Present up to 3 flight options and let the caller pick one")
         present_options.add_bullets("Process", [
-            "Read ALL flight options from flight_summaries: airline, stops, departure/arrival times, duration, and price",
-            "For each option, say 'Option 1...', 'Option 2...', 'Option 3...'",
-            "Ask: 'Which option would you like? Or should I look at different dates?'",
-            "When the caller picks an option, call select_flight with that option_number (1, 2, or 3)",
-            "If caller wants different dates: move back to collect_dates",
-            "If caller wants to change origin/destination: move to error_recovery",
+            "Read each flight option from booking_state.flight_summaries — include airline, stops, times, duration, and price",
+            "Label them 'Option 1' then 'Option 2' then 'Option 3'",
+            "Ask which option they'd like or if they want to look at different dates",
+            "When the caller picks one, call select_flight with that option_number",
+            "If caller wants different dates: move to collect_trip_type",
+            "If caller wants a different route: move to error_recovery",
         ])
-        present_options.add_bullets("Do NOT", [
-            "Do NOT skip to booking — the caller must pick an option first, then price must be confirmed",
-            "Do NOT move to confirm_price without calling select_flight first",
-        ])
+        # select_flight is the only available function; valid_steps enforces transitions
         present_options.set_step_criteria("Caller selects an option via select_flight")
         present_options.set_functions(["select_flight"])
-        present_options.set_valid_steps(["confirm_price", "search_flights", "collect_dates", "error_recovery"])
+        present_options.set_valid_steps(["confirm_price", "search_flights", "collect_trip_type", "error_recovery"])
 
         # CONFIRM PRICE
         confirm_price = ctx.add_step("confirm_price")
         confirm_price.add_section("Task", "Confirm the live price on the selected flight")
         confirm_price.add_bullets("Process", [
-            "Call get_flight_price — no parameters needed, it uses the option chosen via select_flight",
-            "Read back: confirmed price, baggage allowance",
-            "Ask: 'The confirmed price is $487.20 including taxes. Shall I book this?'",
-            "If yes and ${global_data.passenger_profile} exists: go straight to create_booking — you already have all details",
-            "If yes and no profile: move to collect_pax to get name and email",
-            "If no: move back to present_options to pick a different option, or collect_dates for different dates",
+            "Call get_flight_price to confirm the live fare",
+            "Read back the confirmed price and baggage allowance",
+            "Ask if they would like to book",
+            "If yes: move to create_booking",
+            "If no: move back to present_options or collect_trip_type",
         ])
-        confirm_price.add_bullets("Do NOT", [
-            "Do NOT use the search price as the final price — it may have changed",
-            "Do NOT proceed to booking without explicit 'yes'",
-        ])
+        # get_flight_price is the only available function; it returns the live price mechanically
         confirm_price.set_step_criteria("Price confirmed and caller accepts or declines")
         confirm_price.set_functions(["get_flight_price"])
-        confirm_price.set_valid_steps(["create_booking", "collect_pax", "present_options"])
-
-        # COLLECT PASSENGER INFO
-        collect_pax = ctx.add_step("collect_pax")
-        collect_pax.add_section("Task", "Collect passenger details for the booking")
-        collect_pax.add_bullets("Process", [
-            "Check ${global_data.passenger_profile} for existing details:",
-            "  If profile exists: use it directly — DO NOT re-verify name, email, or phone. Just say something like 'Alright, booking under your name now!' and move straight to create_booking",
-            "  If no profile: ask for first name, last name, email address. Use ${global_data.caller_phone} for phone",
-            "  Spell back name and email only for NEW callers without a profile",
-            "Once details are ready, move to create_booking",
-        ])
-        collect_pax.add_bullets("Do NOT", [
-            "Do NOT proceed without confirmed passenger name",
-            "Do NOT ask for passport or ID details in the sandbox demo",
-            "Do NOT collect payment information — sandbox bookings are free test PNRs",
-        ])
-        collect_pax.set_step_criteria("Passenger details confirmed")
-        collect_pax.set_functions("none")
-        collect_pax.set_valid_steps(["create_booking"])
+        confirm_price.set_valid_steps(["create_booking", "present_options"])
 
         # CREATE BOOKING
         create_booking = ctx.add_step("create_booking")
         create_booking.add_section("Task", "Book the flight and wrap up")
         create_booking.add_bullets("Process", [
-            "Call book_flight — it reads passenger details from the profile automatically, no parameters needed",
-            "book_flight handles everything: booking, SMS confirmation, and returns the PNR",
+            "Call book_flight to create the reservation",
             "Read the PNR back to the caller using the NATO phonetic spelling provided",
             "Let them know the confirmation has been texted to their phone",
-            "Thank them and say goodbye — move to wrap_up to end the call",
+            "Thank them and say goodbye",
         ])
-        create_booking.add_bullets("Do NOT", [
-            "Do NOT ask for or verify name, email, or phone — book_flight pulls from the profile",
-            "Do NOT skip the phonetic readback of the PNR",
-        ])
+        # book_flight takes no parameters — profile data is read automatically
         create_booking.set_step_criteria("Booking created, PNR read back, call ending")
         create_booking.set_functions(["book_flight"])
         create_booking.set_valid_steps(["wrap_up", "error_recovery"])
@@ -536,20 +444,14 @@ class VoyagerAgent(AgentBase):
         error_recovery = ctx.add_step("error_recovery")
         error_recovery.add_section("Task", "Handle booking failures, no results, and mid-flow changes")
         error_recovery.add_bullets("Process", [
-            "IMPORTANT: All passenger details are already on file — do NOT re-ask for name, email, phone, or any profile info",
-            "Booking failed / flight unavailable: 'That flight isn't available right now. Want me to search for a different option on the same route, or try a different route?'",
-            "  If same route: move to search_flights to find new options",
-            "  If different route: ask for the new destination, then move to get_destination",
-            "No flights found: 'I didn't find any flights for those dates. Want to try different dates, or maybe a nearby airport?'",
-            "Offer expired: 'That fare is no longer available. Let me search again for current options.' Move to search_flights",
-            "Caller changed mind: 'No problem! Where would you like to fly instead?'",
-        ])
-        error_recovery.add_bullets("Do NOT", [
-            "Do NOT start the entire flow over — keep what you have and only change what's needed",
+            "Offer to search for different options on the same route or try a different route",
+            "If different route: ask for the new destination and call resolve_location",
+            "If different dates: move to collect_trip_type",
+            "If same route: call search_flights to find new options",
         ])
         error_recovery.set_step_criteria("Recovery action taken")
-        error_recovery.set_functions(["resolve_location", "search_flights", "check_cheapest_dates"])
-        error_recovery.set_valid_steps(["get_origin", "get_destination", "collect_dates", "search_flights", "present_options"])
+        error_recovery.set_functions(["resolve_location", "search_flights"])
+        error_recovery.set_valid_steps(["get_origin", "get_destination", "collect_trip_type", "search_flights", "present_options"])
 
         # WRAP UP
         wrap_up = ctx.add_step("wrap_up")
@@ -588,51 +490,88 @@ class VoyagerAgent(AgentBase):
                 "home_airport_name": passenger.get("home_airport_name"),
             }
 
-            agent.set_global_data({
+            agent.update_global_data({
                 "passenger_profile": profile,
                 "is_new_caller": False,
                 "caller_phone": caller_phone,
             })
 
-            # Remove setup_profile / register_passenger — caller is already known
+            # RETURNING CALLER — configure steps with concrete data, no prompt-level conditionals
             ctx = agent._contexts_builder.get_context("default")
+
+            # Greeting: greet by name, then immediately move to get_origin
             greeting_step = ctx.get_step("greeting")
             greeting_step.set_functions("none")
             greeting_step.set_valid_steps(["get_origin"])
+            greeting_step.add_bullets("Process", [
+                f"Say: 'Welcome back {passenger['first_name']}! Let me help you book a flight.'",
+                "Immediately move to get_origin — do NOT ask any booking questions here",
+            ])
+            greeting_step.set_step_criteria("Caller greeted")
 
-            setup_step = ctx.get_step("setup_profile")
-            setup_step.set_functions("none")
-            setup_step.set_valid_steps([])
+            # Disable profile collection — caller is already known
+            collect_profile_step = ctx.get_step("collect_profile")
+            collect_profile_step.set_functions("none")
+            collect_profile_step.set_valid_steps([])
 
-            agent.prompt_add_section("Caller",
-                f"This is a returning passenger named {passenger['first_name']} {passenger['last_name']} "
-                f"calling from {caller_phone}. Greet them by name and ask where they'd like to fly."
-            )
+            # Get origin: prefer home airport for returning callers
+            home_airport = passenger.get("home_airport_name")
+            if home_airport:
+                get_origin_step = ctx.get_step("get_origin")
+                get_origin_step._sections = []  # Clear generic "ask where" instructions
+                get_origin_step.add_section("Task", "Confirm or collect the departure airport")
+                get_origin_step.add_bullets("Process", [
+                    f"The caller's home airport is {home_airport} — offer this first",
+                    f"Say: 'Are you flying from {home_airport} today, or somewhere else?'",
+                    f"If they confirm, call resolve_location with '{home_airport}' and location_type='origin'",
+                    "If they want a different airport, ask where and call resolve_location with their answer",
+                    "After resolve_location returns:",
+                    "  Single airport: Read back the airport name and city and ask the caller to confirm",
+                    "  Multiple airports: Move to disambiguate_origin",
+                    "  No match: Ask the caller to try a different city name or be more specific",
+                    "Once the caller confirms, move to get_destination",
+                ])
+
             agent.prompt_add_section("Passenger Profile", "${global_data.passenger_profile}")
 
         else:
             # NEW CALLER
-            agent.set_global_data({
+            agent.update_global_data({
                 "passenger_profile": None,
                 "is_new_caller": True,
                 "caller_phone": caller_phone,
             })
 
-            # Force new callers through setup_profile — state machine enforced
-            greeting_step = agent._contexts_builder.get_context("default").get_step("greeting")
-            greeting_step.set_valid_steps(["setup_profile"])
+            # NEW CALLER — start directly in collect_profile, greeting folded in
+            ctx = agent._contexts_builder.get_context("default")
 
-            agent.prompt_add_section("New Caller",
-                f"This is a new caller from {caller_phone}. Welcome them to Voyager "
-                "and ask for their first and last name."
-            )
+            greeting_step = ctx.get_step("greeting")
+            greeting_step.set_functions(["profile_start_questions"])
+            greeting_step.set_valid_steps(["collect_profile"])
+            greeting_step.add_bullets("Process", [
+                "Say: 'Welcome to Voyager! I'd love to help you book a flight. Let me get your profile set up.'",
+                "Then immediately call profile_start_questions to begin collecting their information",
+            ])
+            greeting_step.set_step_criteria("Caller greeted and profile_start_questions called")
+
+            collect_profile_step = ctx.get_step("collect_profile")
+            collect_profile_step.add_bullets("Process", [
+                "The first question has already been returned by profile_start_questions — ask it now",
+            ])
 
     def _define_tools(self):
         """Define all SWAIG tool functions."""
 
         # Helper: extract call_id from raw_data
         def _call_id(raw_data):
+            if not isinstance(raw_data, dict):
+                return "unknown"
             return raw_data.get("call_id", "unknown")
+
+        def _change_step(result, step):
+            """Log and apply a forced step change."""
+            logger.info(f"step_change: -> {step}")
+            result.swml_change_step(step)
 
         def _sync_summary(result, state):
             """Save state to DB and sync lightweight summary to global_data."""
@@ -670,7 +609,7 @@ class VoyagerAgent(AgentBase):
         @self.tool(
             name="resolve_location",
             description="Resolve a spoken city or place name to IATA airport code(s). "
-                        "Uses Google Maps for geocoding and Amadeus for airport lookup.",
+                        "Uses Google Maps for geocoding and airport database lookup.",
             wait_file="/sounds/typing.mp3",
             parameters={
                 "type": "object",
@@ -684,25 +623,34 @@ class VoyagerAgent(AgentBase):
                         "description": "Whether this is an 'origin' or 'destination'",
                         "enum": ["origin", "destination"],
                     },
+                    "mode": {
+                        "type": "string",
+                        "description": "normal = resolve and change step (default). verify = resolve and return result without changing step.",
+                        "enum": ["normal", "verify"],
+                    },
                 },
-                "required": ["location_text", "location_type"],
+                "required": ["location_text"],
             },
         )
         def resolve_location(args, raw_data):
-            location_text = args["location_text"]
-            location_type = args["location_type"]
-            logger.info(f"resolve_location: text='{location_text}', type='{location_type}'")
+            location_text = (args.get("location_text") or "").strip()
+            location_type = args.get("location_type", "origin")
+            mode = args.get("mode", "normal")
 
-            # Guard: profile must be complete before resolving airports
+            # Guard: force verify mode during profile collection
             global_data = (raw_data or {}).get("global_data", {})
             if global_data.get("is_new_caller") and not global_data.get("passenger_profile"):
-                logger.warning("resolve_location: blocked — new caller has no profile yet")
-                result = SwaigFunctionResult(
-                    "The passenger profile is not set up yet. "
-                    "Collect the caller's details and call register_passenger first."
+                if mode != "verify":
+                    logger.info(f"resolve_location: forcing mode='verify' (profile collection active)")
+                    mode = "verify"
+
+            logger.info(f"resolve_location: text='{location_text}', type='{location_type}', mode='{mode}'")
+
+            if not location_text:
+                return SwaigFunctionResult(
+                    "No location provided. Ask the caller for a city or airport name "
+                    "and call resolve_location again with their answer."
                 )
-                result.swml_change_step("setup_profile")
-                return result
 
             call_id = _call_id(raw_data)
             state = load_call_state(call_id)
@@ -785,10 +733,16 @@ class VoyagerAgent(AgentBase):
                     airport_info["lat"] = geo["lat"]
                     airport_info["lng"] = geo["lng"]
 
-                state[location_type] = airport_info
                 logger.info(f"resolve_location: auto-selected {top['iata']} for {location_type}")
 
-                next_step = "get_destination" if location_type == "origin" else "collect_dates"
+                if mode == "verify":
+                    return SwaigFunctionResult(
+                        f"Resolved: {top['name']} ({top['iata']})"
+                        f"{' in ' + top['city'] if top['city'] else ''}."
+                    )
+
+                state[location_type] = airport_info
+                next_step = "get_destination" if location_type == "origin" else "collect_trip_type"
                 result = SwaigFunctionResult(
                     f"The closest major airport is {top['name']} ({top['iata']})"
                     f"{' in ' + top['city'] if top['city'] else ''}. "
@@ -797,7 +751,7 @@ class VoyagerAgent(AgentBase):
                 result.add_dynamic_hints([h for h in [top["name"], top["city"]] if h])
                 save_call_state(call_id, state)
                 _sync_summary(result, state)
-                result.swml_change_step(next_step)
+                _change_step(result,next_step)
                 return result
             else:
                 # Multiple airports — need disambiguation
@@ -805,6 +759,11 @@ class VoyagerAgent(AgentBase):
                 airport_list = ", ".join(
                     f"{a['name']} ({a['iata']})" for a in top_3
                 )
+
+                if mode == "verify":
+                    return SwaigFunctionResult(
+                        f"Multiple airports: {airport_list}. Ask which one they mean."
+                    )
 
                 # Store candidates for disambiguation step
                 state[f"{location_type}_candidates"] = [
@@ -826,14 +785,13 @@ class VoyagerAgent(AgentBase):
                 result.add_dynamic_hints(hints)
                 save_call_state(call_id, state)
                 _sync_summary(result, state)
-                result.swml_change_step(disambig_step)
+                _change_step(result,disambig_step)
                 return result
 
         # 2. SELECT AIRPORT
         @self.tool(
             name="select_airport",
-            description="Select an airport from the disambiguation candidates and store it "
-                        "in booking_state. Use after the caller picks from multiple airports.",
+            description="Select an airport from the disambiguation candidates.",
             wait_file="/sounds/typing.mp3",
             parameters={
                 "type": "object",
@@ -852,16 +810,6 @@ class VoyagerAgent(AgentBase):
             },
         )
         def select_airport(args, raw_data):
-            # Guard: profile must be complete before resolving airports
-            global_data = (raw_data or {}).get("global_data", {})
-            if global_data.get("is_new_caller") and not global_data.get("passenger_profile"):
-                result = SwaigFunctionResult(
-                    "The passenger profile is not set up yet. "
-                    "Collect the caller's details and call register_passenger first."
-                )
-                result.swml_change_step("setup_profile")
-                return result
-
             location_type = args["location_type"]
             iata_code = args["iata_code"].upper().strip()
             call_id = _call_id(raw_data)
@@ -897,7 +845,7 @@ class VoyagerAgent(AgentBase):
             }
             logger.info(f"select_airport: set state['{location_type}'] = {selected['iata']}")
 
-            next_step = "get_destination" if location_type == "origin" else "collect_dates"
+            next_step = "get_destination" if location_type == "origin" else "collect_trip_type"
             result = SwaigFunctionResult(
                 f"{selected['name']} ({selected['iata']}) selected as {location_type}. "
                 "Confirm with the caller."
@@ -905,212 +853,130 @@ class VoyagerAgent(AgentBase):
             result.add_dynamic_hints([h for h in [selected["name"], selected["city"]] if h])
             save_call_state(call_id, state)
             _sync_summary(result, state)
-            result.swml_change_step(next_step)
+            _change_step(result,next_step)
             return result
 
-        # 3. REGISTER PASSENGER
+        # 3. SELECT TRIP TYPE
         @self.tool(
-            name="register_passenger",
-            description="Save a new passenger's profile. Call after collecting name, email, DOB, gender, "
-                        "preferences, and home airport during the setup_profile step.",
-            wait_file="/sounds/typing.mp3",
+            name="select_trip_type",
+            description="Record whether this is a round-trip or one-way flight.",
             parameters={
                 "type": "object",
                 "properties": {
-                    "first_name": {
+                    "trip_type": {
                         "type": "string",
-                        "description": "Passenger first name",
-                    },
-                    "last_name": {
-                        "type": "string",
-                        "description": "Passenger last name",
-                    },
-                    "email": {
-                        "type": "string",
-                        "description": "Passenger email address for booking confirmations",
-                    },
-                    "date_of_birth": {
-                        "type": "string",
-                        "description": "Date of birth in YYYY-MM-DD format",
-                    },
-                    "gender": {
-                        "type": "string",
-                        "description": "Gender",
-                        "enum": ["MALE", "FEMALE"],
-                    },
-                    "seat_preference": {
-                        "type": "string",
-                        "description": "Seat preference",
-                        "enum": ["WINDOW", "AISLE"],
-                    },
-                    "cabin_preference": {
-                        "type": "string",
-                        "description": "Cabin class preference",
-                        "enum": ["ECONOMY", "PREMIUM_ECONOMY", "BUSINESS", "FIRST"],
-                    },
-                    "home_airport_name": {
-                        "type": "string",
-                        "description": "The name or city of the passenger's preferred home airport (e.g. 'Los Angeles International' or 'LAX')",
+                        "description": "round_trip or one_way",
+                        "enum": ["round_trip", "one_way"],
                     },
                 },
-                "required": ["first_name", "last_name", "email", "date_of_birth", "gender"],
+                "required": ["trip_type"],
             },
         )
-        def register_passenger(args, raw_data):
+        def select_trip_type(args, raw_data):
+            call_id = _call_id(raw_data)
+            state = load_call_state(call_id)
+            trip_type = args["trip_type"]
+            state["trip_type"] = trip_type
+            save_call_state(call_id, state)
+
+            next_step = "collect_booking_roundtrip" if trip_type == "round_trip" else "collect_booking_oneway"
+            result = SwaigFunctionResult(f"Got it — {trip_type.replace('_', ' ')}.")
+            _sync_summary(result, state)
+            _change_step(result,next_step)
+            return result
+
+        # 4. FINALIZE PROFILE
+        @self.tool(
+            name="finalize_profile",
+            description="Save the completed profile from the info_gatherer answers.",
+            parameters={"type": "object", "properties": {}, "required": []},
+        )
+        def finalize_profile(args, raw_data):
             global_data = (raw_data or {}).get("global_data", {})
             caller_phone = global_data.get("caller_phone", "")
+            skill_data = global_data.get("skill:profile", {})
+            answers = skill_data.get("answers", [])
 
-            if not caller_phone:
-                return SwaigFunctionResult(
-                    "No caller phone number available. Cannot save profile."
-                )
+            # Convert answers list to dict
+            fields = {a["key_name"]: a["answer"] for a in answers}
 
-            first_name = args["first_name"].strip()
-            last_name = args["last_name"].strip()
-            email = args.get("email", "").strip() or None
-            date_of_birth = args["date_of_birth"].strip()
-            gender = args["gender"].strip().upper()
-            home_airport_name = (args.get("home_airport_name") or "").strip() or None
+            first_name = fields.get("first_name", "").strip()
+            last_name = fields.get("last_name", "").strip()
+            if not first_name or not last_name:
+                return SwaigFunctionResult("Missing name. Cannot save profile.")
 
-            home_airport_iata = None  # Resolved later via resolve_location in get_origin
+            home_airport_name = fields.get("home_airport_name", "")
+            home_airport_iata = None
+            iata_match = re.search(r"\(([A-Z]{3})\)", home_airport_name)
+            if iata_match:
+                home_airport_iata = iata_match.group(1)
 
-            logger.info(f"register_passenger: {first_name} {last_name}, phone={caller_phone}, "
-                        f"home_airport={home_airport_iata or home_airport_name}")
-
-            passenger = create_passenger(
+            create_passenger(
                 phone=caller_phone,
-                first_name=first_name,
-                last_name=last_name,
-                date_of_birth=date_of_birth,
-                gender=gender,
-                email=email,
-                seat_preference=args.get("seat_preference"),
-                cabin_preference=args.get("cabin_preference"),
+                first_name=first_name, last_name=last_name,
+                date_of_birth=fields.get("date_of_birth"),
+                gender=fields.get("gender"),
+                email=fields.get("email"),
+                seat_preference=fields.get("seat_preference"),
+                cabin_preference=fields.get("cabin_preference"),
                 home_airport_iata=home_airport_iata,
                 home_airport_name=home_airport_name,
             )
 
-            # Build profile for global_data
             profile = {
-                "phone": caller_phone,
-                "first_name": first_name,
-                "last_name": last_name,
-                "date_of_birth": date_of_birth,
-                "gender": gender,
-                "email": email,
-                "seat_preference": args.get("seat_preference"),
-                "cabin_preference": args.get("cabin_preference"),
-                "home_airport_iata": home_airport_iata,
-                "home_airport_name": home_airport_name,
+                "phone": caller_phone, "first_name": first_name, "last_name": last_name,
+                "date_of_birth": fields.get("date_of_birth"), "gender": fields.get("gender"),
+                "email": fields.get("email"), "seat_preference": fields.get("seat_preference"),
+                "cabin_preference": fields.get("cabin_preference"),
+                "home_airport_iata": home_airport_iata, "home_airport_name": home_airport_name,
             }
 
             result = SwaigFunctionResult(
-                f"Profile saved for {first_name} {last_name}. "
-                "Ask where they would like to fly today."
+                f"Profile saved for {first_name} {last_name}. Now ask where they'd like to fly."
             )
             result.update_global_data({
                 "passenger_profile": profile,
                 "is_new_caller": False,
+                "caller_phone": caller_phone,
             })
-            result.swml_change_step("get_origin")
+            _change_step(result,"get_origin")
             return result
 
-        # 4. SET TRAVEL DATES
+        # 5. FINALIZE BOOKING
         @self.tool(
-            name="set_travel_dates",
-            description="Store the confirmed departure and return dates into booking_state. "
-                        "Call this after the caller confirms their travel dates.",
-            wait_file="/sounds/typing.mp3",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "departure_date": {
-                        "type": "string",
-                        "description": "Departure date in YYYY-MM-DD format",
-                    },
-                    "return_date": {
-                        "type": "string",
-                        "description": "Return date in YYYY-MM-DD format. Omit for one-way trips.",
-                    },
-                },
-                "required": ["departure_date"],
-            },
+            name="finalize_booking",
+            description="Store the collected booking details and prepare for flight search.",
+            parameters={"type": "object", "properties": {}, "required": []},
         )
-        def set_travel_dates(args, raw_data):
+        def finalize_booking(args, raw_data):
+            global_data = (raw_data or {}).get("global_data", {})
             call_id = _call_id(raw_data)
             state = load_call_state(call_id)
+            trip_type = state.get("trip_type", "one_way")
 
-            departure_date = args.get("departure_date", "")
-            return_date = args.get("return_date")
+            # Read answers from whichever booking skill was used
+            skill_key = "skill:roundtrip" if trip_type == "round_trip" else "skill:oneway"
+            skill_data = global_data.get(skill_key, {})
+            answers = skill_data.get("answers", [])
+            fields = {a["key_name"]: a["answer"] for a in answers}
 
-            if not departure_date:
-                return SwaigFunctionResult(
-                    "I need a departure date. Ask the caller when they want to fly."
-                )
+            state["departure_date"] = fields.get("departure_date")
+            state["adults"] = int(fields.get("adults", "1"))
+            state["cabin_class"] = fields.get("cabin_class", "ECONOMY")
+            if trip_type == "round_trip":
+                state["return_date"] = fields.get("return_date")
 
-            state["departure_date"] = departure_date
-            state["return_date"] = return_date
-            logger.info(f"set_travel_dates: {departure_date}, return={return_date}")
-
-            trip_type = "round-trip" if return_date else "one-way"
-            result = SwaigFunctionResult(
-                f"Dates stored: {trip_type}, departing {departure_date}"
-                f"{', returning ' + return_date if return_date else ''}. "
-                "Now ask how many passengers and what cabin class."
-            )
             save_call_state(call_id, state)
+
+            result = SwaigFunctionResult("Booking details saved. Now searching for flights.")
             _sync_summary(result, state)
+            _change_step(result,"search_flights")
             return result
 
-        # 4. SET PASSENGER INFO
-        @self.tool(
-            name="set_passenger_info",
-            description="Store the number of passengers and cabin class into booking_state. "
-                        "Call this after the caller confirms how many are traveling and their cabin preference.",
-            wait_file="/sounds/typing.mp3",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "adults": {
-                        "type": "integer",
-                        "description": "Number of adult passengers",
-                    },
-                    "cabin_class": {
-                        "type": "string",
-                        "description": "Cabin class preference",
-                        "enum": ["ECONOMY", "PREMIUM_ECONOMY", "BUSINESS", "FIRST"],
-                    },
-                },
-                "required": ["adults", "cabin_class"],
-            },
-        )
-        def set_passenger_info(args, raw_data):
-            call_id = _call_id(raw_data)
-            state = load_call_state(call_id)
-
-            adults = args.get("adults", 1)
-            cabin_class = args.get("cabin_class", "ECONOMY")
-
-            state["adults"] = adults
-            state["cabin_class"] = cabin_class
-            logger.info(f"set_passenger_info: {adults} adults, {cabin_class}")
-
-            pax = f"{adults} adult{'s' if adults > 1 else ''}"
-            result = SwaigFunctionResult(
-                f"Passenger info stored: {pax}, {cabin_class.lower().replace('_', ' ')}. "
-                "Now searching for flights."
-            )
-            save_call_state(call_id, state)
-            _sync_summary(result, state)
-            result.swml_change_step("search_flights")
-            return result
-
-        # 4. SEARCH FLIGHTS
+        # 6. SEARCH FLIGHTS
         @self.tool(
             name="search_flights",
-            description="Search for up to 3 flight options using the origin, destination, dates, and passenger info "
-                        "already stored in booking_state. No parameters needed — "
-                        "everything comes from prior tool calls (resolve_location and set_travel_details).",
+            description="Search for available flights and return up to 3 options.",
             wait_file="/sounds/typing.mp3",
             parameters={
                 "type": "object",
@@ -1130,7 +996,7 @@ class VoyagerAgent(AgentBase):
                 result = SwaigFunctionResult(
                     "No origin airport set. Need to resolve the departure city first."
                 )
-                result.swml_change_step("get_origin")
+                _change_step(result,"get_origin")
                 return result
 
             if not destination:
@@ -1140,19 +1006,19 @@ class VoyagerAgent(AgentBase):
                     result = SwaigFunctionResult(
                         "Destination airport not selected yet. The caller needs to pick from the candidates."
                     )
-                    result.swml_change_step("disambiguate_destination")
+                    _change_step(result,"disambiguate_destination")
                 else:
                     result = SwaigFunctionResult(
                         "No destination airport set. Need to resolve the destination city first."
                     )
-                    result.swml_change_step("get_destination")
+                    _change_step(result,"get_destination")
                 return result
 
             if not departure_date:
                 result = SwaigFunctionResult(
                     "No travel dates set. Need to collect dates from the caller first."
                 )
-                result.swml_change_step("collect_dates")
+                _change_step(result,"collect_trip_type")
                 return result
 
             origin_iata = origin["iata"]
@@ -1179,7 +1045,7 @@ class VoyagerAgent(AgentBase):
                     f"No flights found from {origin_iata} to {dest_iata} on {departure_date}. "
                     "Ask the caller if they'd like to try different dates or a nearby airport."
                 )
-                result.swml_change_step("error_recovery")
+                _change_step(result,"error_recovery")
                 return result
 
             # Note if we fell back to a different cabin class
@@ -1210,7 +1076,7 @@ class VoyagerAgent(AgentBase):
             )
             save_call_state(call_id, state)
             _sync_summary(result, state)
-            result.swml_change_step("present_options")
+            _change_step(result,"present_options")
             return result
 
         # 5. SELECT FLIGHT
@@ -1224,7 +1090,8 @@ class VoyagerAgent(AgentBase):
                 "properties": {
                     "option_number": {
                         "type": "integer",
-                        "description": "The option number the caller chose (1, 2, or 3)",
+                        "description": "The option number the caller chose",
+                        "enum": [1, 2, 3],
                     },
                 },
                 "required": ["option_number"],
@@ -1242,7 +1109,7 @@ class VoyagerAgent(AgentBase):
                 result = SwaigFunctionResult(
                     "No flight options available. Need to search for flights first."
                 )
-                result.swml_change_step("search_flights")
+                _change_step(result,"search_flights")
                 return result
 
             idx = option_number - 1
@@ -1266,14 +1133,13 @@ class VoyagerAgent(AgentBase):
             )
             save_call_state(call_id, state)
             _sync_summary(result, state)
-            result.swml_change_step("confirm_price")
+            _change_step(result,"confirm_price")
             return result
 
         # 6. GET FLIGHT PRICE
         @self.tool(
             name="get_flight_price",
-            description="Confirm the exact price for the flight selected via select_flight. "
-                        "No parameters needed — reads the stored offer automatically.",
+            description="Confirm the exact price for the flight selected via select_flight.",
             wait_file="/sounds/typing.mp3",
             parameters={
                 "type": "object",
@@ -1290,91 +1156,30 @@ class VoyagerAgent(AgentBase):
                 result = SwaigFunctionResult(
                     "No flight search results on file. Need to search for flights first."
                 )
-                result.swml_change_step("search_flights")
+                _change_step(result,"search_flights")
                 return result
 
-            logger.info("get_flight_price: attempt 1 — pricing stored offer directly")
+            # Price the stored offer (mock always succeeds)
+            logger.info(f"get_flight_price: pricing offer id={offer.get('id')}")
+            pd = _price_offer(offer)
+            po = (pd or {}).get("flightOffers", [])
 
-            priced_data = _price_offer(offer)
-            priced_offers = (priced_data or {}).get("flightOffers", [])
-
-            # Fallback: if stored offer is rejected (expired/stale), do a
-            # fresh search → match by carrier+flight numbers → price that.
-            if not priced_offers:
-                logger.warning("get_flight_price: stored offer rejected, trying fresh search fallback")
-                origin = state.get("origin", {})
-                destination = state.get("destination", {})
-                dep_date = state.get("departure_date", "")
-                return_date = state.get("return_date")
-                adults = state.get("adults", 1)
-                cabin = state.get("cabin_class", "ECONOMY")
-
-                # Extract carrier+flight identifiers from the stored offer
-                original_segments = []
-                for itin in offer.get("itineraries", []):
-                    for seg in itin.get("segments", []):
-                        original_segments.append(
-                            f"{seg.get('carrierCode', '')}{seg.get('number', '')}"
-                        )
-                logger.info(f"get_flight_price: matching segments {original_segments}")
-
-                fresh_offers, fresh_dicts, _ = _search_flights(
-                    origin=origin.get("iata", ""),
-                    destination=destination.get("iata", ""),
-                    departure_date=dep_date,
-                    return_date=return_date,
-                    adults=adults,
-                    cabin_class=cabin,
-                    max_results=10,
+            if not po:
+                result = SwaigFunctionResult(
+                    "Could not confirm the price. "
+                    "Ask the caller if they'd like to search again or try different dates."
                 )
-                logger.info(f"get_flight_price: fresh search returned {len(fresh_offers or [])} offers")
+                _change_step(result,"error_recovery")
+                return result
 
-                matched_offer = None
-                for fo in (fresh_offers or []):
-                    segs = []
-                    for itin in fo.get("itineraries", []):
-                        for seg in itin.get("segments", []):
-                            segs.append(f"{seg.get('carrierCode', '')}{seg.get('number', '')}")
-                    if segs == original_segments:
-                        matched_offer = fo
-                        break
-
-                if matched_offer:
-                    logger.info("get_flight_price: attempt 2 — pricing fresh matched offer")
-                    priced_data = _price_offer(matched_offer)
-                    priced_offers = (priced_data or {}).get("flightOffers", [])
-                else:
-                    logger.error(f"get_flight_price: no segment match in {len(fresh_offers or [])} fresh offers")
-
-            if not priced_offers:
-                return SwaigFunctionResult(
-                    "Could not confirm the price — the offer may have expired. "
-                    "Ask the caller if they'd like to search again."
-                )
-
-            priced_offer = priced_offers[0]
+            priced_offer = po[0]
             price = priced_offer.get("price", {})
             total = price.get("grandTotal") or price.get("total", "?")
             currency = price.get("currency", "USD")
-
-            # Extract baggage and fare rules if available
-            traveler_pricings = priced_offer.get("travelerPricings", [])
-            baggage_info = ""
-            if traveler_pricings:
-                segments = traveler_pricings[0].get("fareDetailsBySegment", [])
-                if segments:
-                    cabin_class = segments[0].get("cabin", "ECONOMY")
-                    included_bags = segments[0].get("includedCheckedBags", {})
-                    bag_qty = included_bags.get("quantity", 0)
-                    bag_weight = included_bags.get("weight")
-                    if bag_qty:
-                        baggage_info = f"{bag_qty} checked bag{'s' if bag_qty > 1 else ''} included. "
-                    elif bag_weight:
-                        baggage_info = f"Checked bags up to {bag_weight}kg included. "
-                    else:
-                        baggage_info = "Carry-on only, checked bags extra. "
+            baggage_info = _extract_baggage(priced_offer)
 
             state["priced_offer"] = priced_offer
+            state["split_ticketing"] = False
             state["confirmed_price"] = f"${total} {currency}"
             logger.info(f"get_flight_price: confirmed ${total} {currency}")
 
@@ -1386,53 +1191,47 @@ class VoyagerAgent(AgentBase):
             )
             save_call_state(call_id, state)
             _sync_summary(result, state)
-            result.swml_change_step("collect_pax")
+            _change_step(result,"create_booking")
             return result
 
         # 6. BOOK FLIGHT
         @self.tool(
             name="book_flight",
-            description="Book the confirmed flight. Creates a PNR. "
-                        "Uses passenger_profile from global_data automatically. "
-                        "Only pass parameters to override the profile (e.g. for new callers without a profile).",
+            description="Book the confirmed flight and create a PNR.",
             wait_file="/sounds/typing.mp3",
             parameters={
                 "type": "object",
-                "properties": {
-                    "first_name": {
-                        "type": "string",
-                        "description": "Passenger first name (optional if profile exists)",
-                    },
-                    "last_name": {
-                        "type": "string",
-                        "description": "Passenger last name (optional if profile exists)",
-                    },
-                    "email": {
-                        "type": "string",
-                        "description": "Passenger email address (optional if profile exists)",
-                    },
-                    "phone": {
-                        "type": "string",
-                        "description": "Passenger phone number (optional if profile exists)",
-                    },
-                },
+                "properties": {},
                 "required": [],
             },
         )
         def book_flight(args, raw_data):
-            # Pull from profile first, override with explicit args
+            # All passenger details come from global_data — no args needed
             profile = (raw_data or {}).get("global_data", {}).get("passenger_profile") or {}
             caller_phone = (raw_data or {}).get("global_data", {}).get("caller_phone", "")
 
-            first_name = (args.get("first_name") or profile.get("first_name") or "").strip()
-            last_name = (args.get("last_name") or profile.get("last_name") or "").strip()
-            email = (args.get("email") or profile.get("email") or "").strip()
-            phone = (args.get("phone") or caller_phone or profile.get("phone") or "").strip()
+            first_name = (profile.get("first_name") or "").strip()
+            last_name = (profile.get("last_name") or "").strip()
+            email = (profile.get("email") or "").strip()
+            phone = (caller_phone or profile.get("phone") or "").strip()
+            date_of_birth = (profile.get("date_of_birth") or "").strip()
+            gender = (profile.get("gender") or "").strip()
 
-            if not first_name or not last_name or not email:
+            missing = []
+            if not first_name or not last_name:
+                missing.append("name")
+            if not email:
+                missing.append("email")
+            if not date_of_birth:
+                missing.append("date of birth")
+            if not gender:
+                missing.append("gender")
+            if not phone:
+                missing.append("phone")
+            if missing:
                 return SwaigFunctionResult(
-                    "Missing passenger details — need at least first name, last name, and email. "
-                    "Ask the caller for the missing info."
+                    f"Missing passenger details: {' and '.join(missing)}. "
+                    "Cannot book without a complete profile."
                 )
 
             call_id = _call_id(raw_data)
@@ -1444,6 +1243,14 @@ class VoyagerAgent(AgentBase):
                         f"destination={state.get('destination')}, "
                         f"priced_offer={'YES' if priced_offer else 'NO'}")
 
+            # Guard: no origin
+            if not state.get("origin"):
+                result = SwaigFunctionResult(
+                    "No origin airport set. Need to resolve the departure city first."
+                )
+                _change_step(result,"get_origin")
+                return result
+
             # Guard: no destination
             if not state.get("destination"):
                 candidates = state.get("destination_candidates")
@@ -1451,12 +1258,12 @@ class VoyagerAgent(AgentBase):
                     result = SwaigFunctionResult(
                         "Destination airport not selected yet. The caller needs to pick from the candidates."
                     )
-                    result.swml_change_step("disambiguate_destination")
+                    _change_step(result,"disambiguate_destination")
                 else:
                     result = SwaigFunctionResult(
                         "No destination airport set. Need to collect the destination first."
                     )
-                    result.swml_change_step("get_destination")
+                    _change_step(result,"get_destination")
                 return result
 
             # Guard: no confirmed price → back to pricing
@@ -1464,7 +1271,7 @@ class VoyagerAgent(AgentBase):
                 result = SwaigFunctionResult(
                     "No confirmed price on file. Need to confirm the fare first."
                 )
-                result.swml_change_step("confirm_price")
+                _change_step(result,"confirm_price")
                 return result
 
             logger.info(f"book_flight: {first_name} {last_name}, {email}")
@@ -1475,17 +1282,14 @@ class VoyagerAgent(AgentBase):
             return_date = state.get("return_date")
             cabin = state.get("cabin_class", "ECONOMY")
 
-            booking_offer = priced_offer
-            price_changed = False
-            old_total = priced_offer.get("price", {}).get("grandTotal") or priced_offer.get("price", {}).get("total")
             travelers = [{
                 "id": "1",
-                "dateOfBirth": profile.get("date_of_birth") or "1990-01-01",
+                "dateOfBirth": date_of_birth,
                 "name": {
                     "firstName": first_name.upper(),
                     "lastName": last_name.upper(),
                 },
-                "gender": profile.get("gender") or "MALE",
+                "gender": gender,
                 "contact": {
                     "emailAddress": email,
                     "phones": [{
@@ -1496,143 +1300,88 @@ class VoyagerAgent(AgentBase):
                 },
             }]
 
-            # Try 1: book directly with the priced offer from get_flight_price
-            logger.info("book_flight: attempt 1 — booking with priced offer")
-            order = _create_order(booking_offer, travelers)
-
-            # Try 2: if direct booking failed, do a fresh search → match → reprice → book.
-            # The pricing API echoes back YOUR segment times without refreshing from
-            # the GDS, so stale times from the original search carry through.
-            if not order:
-                logger.warning("book_flight: attempt 1 FAILED, trying fresh search → reprice → book")
-                origin_iata = origin.get("iata", "")
-                dest_iata = destination.get("iata", "")
-                adults = state.get("adults", 1)
-
-                original_segments = []
-                for itin in priced_offer.get("itineraries", []):
-                    for seg in itin.get("segments", []):
-                        original_segments.append(
-                            f"{seg.get('carrierCode', '')}{seg.get('number', '')}"
-                        )
-                logger.info(f"book_flight: matching segments {original_segments}")
-
-                fresh_offers, _, _ = _search_flights(
-                    origin=origin_iata, destination=dest_iata,
-                    departure_date=dep_date, return_date=return_date,
-                    adults=adults, cabin_class=cabin, max_results=10,
-                )
-                logger.info(f"book_flight: fresh search returned {len(fresh_offers or [])} offers")
-
-                matched_offer = None
-                for fo in (fresh_offers or []):
-                    segs = []
-                    for itin in fo.get("itineraries", []):
-                        for seg in itin.get("segments", []):
-                            segs.append(f"{seg.get('carrierCode', '')}{seg.get('number', '')}")
-                    if segs == original_segments:
-                        matched_offer = fo
-                        break
-
-                if matched_offer:
-                    fresh_price_data = _price_offer(matched_offer)
-                    if fresh_price_data and fresh_price_data.get("flightOffers"):
-                        booking_offer = fresh_price_data["flightOffers"][0]
-                        fresh_total = booking_offer.get("price", {}).get("grandTotal") or booking_offer.get("price", {}).get("total")
-                        price_changed = fresh_total != old_total
-                        if price_changed:
-                            logger.info(f"book_flight: price changed from ${old_total} to ${fresh_total}")
-                        logger.info("book_flight: attempt 2 — booking with fresh priced offer")
-                        order = _create_order(booking_offer, travelers)
-                        if order:
-                            logger.info("book_flight: attempt 2 SUCCEEDED")
-                        else:
-                            logger.error("book_flight: attempt 2 FAILED")
-                    else:
-                        logger.error("book_flight: fresh reprice returned no offers")
-                else:
-                    logger.error(f"book_flight: no segment match in {len(fresh_offers or [])} fresh offers")
+            # Book the priced offer (mock always succeeds)
+            logger.info("book_flight: creating order")
+            order = _create_order(priced_offer, travelers)
 
             if not order:
                 result = SwaigFunctionResult(
                     "The booking failed — this flight isn't available right now. "
                     "All passenger details are still on file — do NOT re-ask for name, email, or phone. "
-                    "Ask the caller if they'd like to try a different flight on this route or a different route entirely."
+                    "Ask the caller if they'd like to try a different flight or different dates."
                 )
                 _sync_summary(result, state)
-                result.swml_change_step("error_recovery")
+                _change_step(result,"error_recovery")
                 return result
 
-            # Extract PNR
-            associated_records = order.get("associatedRecords", [])
-            pnr = associated_records[0].get("reference", "UNKNOWN") if associated_records else "UNKNOWN"
+            pnr = order.get("associatedRecords", [{}])[0].get("reference", "UNKNOWN")
             phonetic = nato_spell(pnr)
-
-            price = booking_offer.get("price", {})
+            price = priced_offer.get("price", {})
             total = price.get("grandTotal") or price.get("total", "?")
 
             state["booking"] = {
-                "pnr": pnr,
-                "phonetic": phonetic,
+                "pnr": pnr, "phonetic": phonetic,
                 "route": f"{origin.get('iata', '?')} to {destination.get('iata', '?')}",
-                "departure": dep_date,
-                "price": total,
+                "departure": dep_date, "price": total,
                 "passenger": f"{first_name} {last_name}",
-                "email": email,
-                "phone": phone,
+                "email": email, "phone": phone,
             }
+            if return_date:
+                state["booking"]["return"] = return_date
 
-            logger.info(f"book_flight: PNR={pnr}, final price=${total}")
+            logger.info(f"book_flight: PNR={pnr}, price=${total}")
 
-            # Update passenger profile email if missing
             if profile and not profile.get("email") and email:
                 profile_phone = profile.get("phone", "")
                 if profile_phone:
                     update_passenger(profile_phone, email=email)
 
-            # Persist to bookings table for dashboard
+            # Extract per-leg details for dashboard display
+            legs = []
+            for i, itin in enumerate(priced_offer.get("itineraries", [])):
+                direction = "outbound" if i == 0 else "return"
+                itin_duration = itin.get("duration", "")
+                for seg in itin.get("segments", []):
+                    legs.append({
+                        "direction": direction,
+                        "itin_duration": itin_duration,
+                        "carrier": seg.get("carrierCode", ""),
+                        "operating_carrier": seg.get("operating", {}).get("carrierCode", ""),
+                        "flight": seg.get("carrierCode", "") + seg.get("number", ""),
+                        "aircraft": seg.get("aircraft", {}).get("code", ""),
+                        "from": seg.get("departure", {}).get("iataCode", ""),
+                        "dep_time": seg.get("departure", {}).get("at", ""),
+                        "to": seg.get("arrival", {}).get("iataCode", ""),
+                        "arr_time": seg.get("arrival", {}).get("at", ""),
+                    })
+
             save_booking(
-                call_id=call_id,
-                pnr=pnr,
+                call_id=call_id, pnr=pnr,
                 passenger_name=f"{first_name} {last_name}",
-                email=email,
-                phone=phone,
-                origin_iata=origin.get("iata", "?"),
-                origin_name=origin.get("name", ""),
-                destination_iata=destination.get("iata", "?"),
-                destination_name=destination.get("name", ""),
-                departure_date=dep_date,
-                return_date=return_date,
-                cabin_class=cabin,
-                price=total,
+                email=email, phone=phone,
+                origin_iata=origin.get("iata", "?"), origin_name=origin.get("name", ""),
+                destination_iata=destination.get("iata", "?"), destination_name=destination.get("name", ""),
+                departure_date=dep_date, return_date=return_date,
+                cabin_class=cabin, price=total,
                 currency=price.get("currency", "USD"),
+                legs_json=json.dumps(legs) if legs else None,
             )
 
-            price_note = ""
-            if price_changed:
-                price_note = (
-                    f"Note: the price changed slightly from ${old_total} to ${total} "
-                    "since it was confirmed. Let the caller know. "
-                )
+            route_name = (f"{origin.get('name', origin.get('iata', '?'))} to "
+                          f"{destination.get('name', destination.get('iata', '?'))}")
 
-            # Send SMS confirmation
             sms_body = (
                 f"Voyager - Flight Confirmed!\n"
-                f"PNR: {pnr}\n"
-                f"Route: {origin.get('name', origin.get('iata', '?'))} to "
-                f"{destination.get('name', destination.get('iata', '?'))}\n"
-                f"Departure: {dep_date}\n"
-                f"Price: ${total}\n"
-                f"Passenger: {first_name} {last_name}\n"
+                f"PNR: {pnr}\nRoute: {route_name}\n"
+                f"Departure: {dep_date}"
+                f"{' | Return: ' + return_date if return_date else ''}\n"
+                f"Price: ${total}\nPassenger: {first_name} {last_name}\n"
                 f"Thank you for using Voyager!"
             )
 
             result = SwaigFunctionResult(
-                f"{price_note}"
                 f"Booked! Confirmation code is {pnr} — that's {phonetic}. "
-                f"Flight from {origin.get('name', origin.get('iata', '?'))} to "
-                f"{destination.get('name', destination.get('iata', '?'))}, "
-                f"departing {dep_date}, ${total}. "
+                f"Flight {route_name}, departing {dep_date}, ${total}. "
                 "A confirmation text has been sent to the caller's phone. "
                 "Read the confirmation code using the phonetic spelling, "
                 "let them know the details have been texted, thank them, and end the call."
@@ -1644,74 +1393,10 @@ class VoyagerAgent(AgentBase):
             )
             save_call_state(call_id, state)
             _sync_summary(result, state)
-            result.swml_change_step("wrap_up")
+            _change_step(result,"wrap_up")
             return result
 
-        # 7. CHECK CHEAPEST DATES
-        @self.tool(
-            name="check_cheapest_dates",
-            description="Find the cheapest travel dates for a route. "
-                        "Use when the caller is flexible on dates.",
-            wait_file="/sounds/typing.mp3",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "month": {
-                        "type": "string",
-                        "description": "Target month in YYYY-MM format, or empty for next 30 days",
-                    },
-                },
-                "required": [],
-            },
-        )
-        def check_cheapest_dates(args, raw_data):
-            call_id = _call_id(raw_data)
-            state = load_call_state(call_id)
-
-            origin = state.get("origin")
-            destination = state.get("destination")
-
-            if not origin or not destination:
-                return SwaigFunctionResult(
-                    "I need both origin and destination airports before checking dates."
-                )
-
-            month = args.get("month")
-            departure_date = f"{month}-01" if month else None
-
-            logger.info(f"check_cheapest_dates: {origin['iata']}->{destination['iata']}, month={month}")
-
-            results = _cheapest_dates(
-                origin=origin["iata"],
-                destination=destination["iata"],
-                departure_date=departure_date,
-            )
-
-            if not results:
-                return SwaigFunctionResult(
-                    "I couldn't find date-price data for that route. "
-                    "Ask the caller for specific dates instead."
-                )
-
-            # Sort by price, take top 3
-            sorted_dates = sorted(results, key=lambda x: float(x.get("price", {}).get("total", "99999")))[:3]
-
-            options = []
-            for d in sorted_dates:
-                dep = d.get("departureDate", "?")
-                ret = d.get("returnDate", "")
-                price = d.get("price", {}).get("total", "?")
-                if ret:
-                    options.append(f"{dep} to {ret} at ${price}")
-                else:
-                    options.append(f"{dep} at ${price}")
-
-            return SwaigFunctionResult(
-                f"The cheapest dates are: {'; '.join(options)}. "
-                "Ask the caller which dates work best."
-            )
-
-        # 8. SUMMARIZE CONVERSATION
+        # 7. SUMMARIZE CONVERSATION
         @self.tool(
             name="summarize_conversation",
             description="Generate a structured call summary. Called automatically when the conversation ends.",

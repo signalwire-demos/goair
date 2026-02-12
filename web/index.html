@@ -218,6 +218,17 @@
         .badge.completed { background: rgba(100, 181, 246, 0.15); color: #64b5f6; }
         .badge.cancelled { background: rgba(239, 83, 80, 0.15); color: #ef5350; }
 
+        .flight-col { max-width: 320px; }
+        .leg { display: flex; align-items: center; gap: 8px; line-height: 1.6; margin: 2px 0; }
+        .leg img { width: 40px; height: 40px; border-radius: 8px; background: #fff; padding: 3px; flex-shrink: 0; box-shadow: 0 0 8px rgba(0, 180, 216, 0.4), 0 1px 3px rgba(0,0,0,0.3); border: 1px solid rgba(0, 180, 216, 0.25); }
+        .leg-details { display: flex; flex-direction: column; min-width: 0; }
+        .leg-text { font-size: 0.85rem; white-space: nowrap; }
+        .leg-meta { font-size: 0.75rem; color: #8a8fa8; white-space: nowrap; }
+        .leg-aircraft { color: #666; }
+        .leg-direction { font-size: 0.7rem; color: #8a8fa8; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 6px; }
+        .leg-direction:first-child { margin-top: 0; }
+        .leg-duration { color: #00b4d8; font-weight: 600; margin-left: 6px; }
+
         .route { max-width: 240px; }
         .route-from, .route-to { display: block; line-height: 1.4; }
         .route-from::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #4caf50; margin-right: 6px; }
@@ -304,7 +315,7 @@
                     <tr>
                         <th>PNR</th>
                         <th>Passenger</th>
-                        <th>Route</th>
+                        <th>Flight</th>
                         <th>Departure</th>
                         <th>Cabin</th>
                         <th>Price</th>
@@ -360,6 +371,55 @@
             return Math.floor(diff / 86400) + 'd ago';
         }
 
+        function fmtTime(isoStr) {
+            if (!isoStr) return '';
+            const d = new Date(isoStr);
+            if (isNaN(d)) return isoStr.slice(11, 16) || '';
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+        }
+
+        function fmtDuration(iso) {
+            if (!iso) return '';
+            const m = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?/);
+            if (!m) return '';
+            const h = m[1] ? m[1] + 'h' : '';
+            const min = m[2] ? m[2] + 'm' : '';
+            return h + (h && min ? ' ' : '') + min;
+        }
+
+        function renderLegs(b) {
+            if (!b.legs || b.legs.length === 0) {
+                // Fallback to origin/destination display
+                return `<div class="route">
+                    <span class="route-from">${b.origin_name || b.origin_iata || '?'} (${b.origin_iata || '?'})</span>
+                    <span class="route-to">${b.destination_name || b.destination_iata || '?'} (${b.destination_iata || '?'})</span>
+                </div>`;
+            }
+            let html = '';
+            let lastDir = '';
+            for (const leg of b.legs) {
+                if (leg.direction !== lastDir) {
+                    const dur = fmtDuration(leg.itin_duration);
+                    html += `<div class="leg-direction">${leg.direction}${dur ? ' <span class="leg-duration">' + dur + '</span>' : ''}</div>`;
+                    lastDir = leg.direction;
+                }
+                const logoUrl = leg.carrier
+                    ? `https://pics.avs.io/70/70/${leg.carrier}.png`
+                    : '';
+                const dep = fmtTime(leg.dep_time);
+                const arr = fmtTime(leg.arr_time);
+                const times = dep && arr ? `${dep}\u2013${arr}` : '';
+                const aircraft = leg.aircraft ? `<span class="leg-aircraft">${leg.aircraft}</span>` : '';
+                html += `<div class="leg">`;
+                if (logoUrl) html += `<img src="${logoUrl}" alt="${leg.carrier}" onerror="this.style.display='none'">`;
+                html += `<div class="leg-details">`;
+                html += `<span class="leg-text">${leg.flight || ''} ${leg.from}\u2192${leg.to}</span>`;
+                if (times || aircraft) html += `<span class="leg-meta">${times}${times && aircraft ? ' \u00b7 ' : ''}${aircraft}</span>`;
+                html += `</div></div>`;
+            }
+            return html;
+        }
+
         function renderTable() {
             const filtered = currentFilter === 'all'
                 ? allBookings
@@ -376,10 +436,7 @@
                 <tr>
                     <td class="pnr">${b.pnr || '-'}</td>
                     <td><strong>${b.passenger_name || '-'}</strong><br><span class="time-ago">${b.email || ''}</span></td>
-                    <td class="route">
-                        <span class="route-from">${b.origin_name || b.origin_iata || '?'} (${b.origin_iata || '?'})</span>
-                        <span class="route-to">${b.destination_name || b.destination_iata || '?'} (${b.destination_iata || '?'})</span>
-                    </td>
+                    <td class="flight-col">${renderLegs(b)}</td>
                     <td>${b.departure_date || '-'}${b.return_date ? '<br><span class="time-ago">ret ' + b.return_date + '</span>' : ''}</td>
                     <td><span class="cabin">${(b.cabin_class || 'economy').toLowerCase().replace('_', ' ')}</span></td>
                     <td class="price">${b.price ? '$' + parseFloat(b.price).toFixed(2) : '-'}</td>
