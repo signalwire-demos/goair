@@ -24,7 +24,7 @@ AMADEUS_BASE_URL = os.getenv("AMADEUS_BASE_URL", "https://test.api.amadeus.com")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
 # AI Model
-AI_MODEL = os.getenv("AI_MODEL", "claude-sonnet-4-20250514")
+AI_MODEL = os.getenv("AI_MODEL", "gpt-oss-120b")
 AI_TOP_P = float(os.getenv("AI_TOP_P", "0.5"))
 AI_TEMPERATURE = float(os.getenv("AI_TEMPERATURE", "0.5"))
 
