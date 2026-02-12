@@ -315,6 +315,56 @@ run --raw --call-id "${CALL_ID}-igb" --custom-data "$(cd_gd)" --exec finalize_bo
 check "finalize_booking → Booking details saved" "Booking details saved\|searching"
 
 # =============================================================================
+section "4b. roundtrip booking info_gatherer flow"
+# =============================================================================
+
+# Set up origin/destination/trip_type via DB-persisted calls
+run --raw --call-id "${CALL_ID}-igr" --exec resolve_location --location_text "Tulsa" --location_type origin
+run --raw --call-id "${CALL_ID}-igr" --exec resolve_location --location_text "Atlanta" --location_type destination
+run --raw --call-id "${CALL_ID}-igr" --exec select_trip_type --trip_type round_trip
+
+# Initialize GD with roundtrip questions
+GD=$(jq -c . <<'EOGD'
+{
+  "skill:roundtrip": {
+    "questions": [
+      {"key_name": "departure_date", "question_text": "When would you like to depart?", "confirm": true, "prompt_add": "Accept natural language but submit in YYYY-MM-DD format."},
+      {"key_name": "return_date", "question_text": "And when would you like to return?", "confirm": true, "prompt_add": "Accept natural language but submit in YYYY-MM-DD format. Must be after departure date."},
+      {"key_name": "adults", "question_text": "How many passengers will be traveling?", "prompt_add": "Submit as a positive integer (e.g. 1, 2, 3). Maximum 8 — for larger parties, tell the caller they'll need to contact a travel agent."},
+      {"key_name": "cabin_class", "question_text": "What cabin class would you like — economy, premium economy, business, or first?", "prompt_add": "Submit exactly ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST. If the passenger has a stored cabin preference in their profile, suggest it."}
+    ],
+    "question_index": 0,
+    "answers": []
+  }
+}
+EOGD
+)
+
+# start_questions → first question
+run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_start_questions
+check "start_questions → asks departure" "depart"
+
+# departure_date WITH confirmation
+run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "2026-10-01" --confirmed true
+check "departure_date → advances to return" "return"
+
+# return_date WITH confirmation
+run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "2026-10-08" --confirmed true
+check "return_date → advances to passengers" "passenger\|how many"
+
+# adults
+run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "2"
+check "adults → advances to cabin" "cabin"
+
+# cabin_class → last question → completion
+run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "BUSINESS"
+check "cabin_class → completion message" "finalize_booking"
+
+# finalize with accumulated answers
+run --raw --call-id "${CALL_ID}-igr" --custom-data "$(cd_gd)" --exec finalize_booking
+check "finalize_booking → Booking details saved" "Booking details saved\|searching"
+
+# =============================================================================
 section "5. search_flights — guard checks"
 # =============================================================================
 
