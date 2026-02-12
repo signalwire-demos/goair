@@ -746,12 +746,13 @@ class VoyagerAgent(AgentBase):
                 result = SwaigFunctionResult(
                     f"The closest major airport is {top['name']} ({top['iata']})"
                     f"{' in ' + top['city'] if top['city'] else ''}. "
-                    "Confirm with the caller that this is correct."
+                    "Confirm with the caller that this is correct. "
+                    f"If they confirm, move to {next_step}. "
+                    "If not, ask for a different city and call resolve_location again."
                 )
                 result.add_dynamic_hints([h for h in [top["name"], top["city"]] if h])
                 save_call_state(call_id, state)
                 _sync_summary(result, state)
-                _change_step(result,next_step)
                 return result
             else:
                 # Multiple airports — need disambiguation
@@ -848,12 +849,13 @@ class VoyagerAgent(AgentBase):
             next_step = "get_destination" if location_type == "origin" else "collect_trip_type"
             result = SwaigFunctionResult(
                 f"{selected['name']} ({selected['iata']}) selected as {location_type}. "
-                "Confirm with the caller."
+                "Confirm with the caller. "
+                f"If they confirm, move to {next_step}. "
+                "If not, ask which airport they prefer and call select_airport again."
             )
             result.add_dynamic_hints([h for h in [selected["name"], selected["city"]] if h])
             save_call_state(call_id, state)
             _sync_summary(result, state)
-            _change_step(result,next_step)
             return result
 
         # 3. SELECT TRIP TYPE
@@ -897,19 +899,26 @@ class VoyagerAgent(AgentBase):
             skill_data = global_data.get("skill:profile", {})
             answers = skill_data.get("answers", [])
 
-            # Convert answers list to dict
-            fields = {a["key_name"]: a["answer"] for a in answers}
+            # Convert answers list to dict (skip incomplete entries)
+            fields = {
+                a.get("key_name"): a.get("answer")
+                for a in answers
+                if a.get("key_name") and a.get("answer")
+            }
 
-            first_name = fields.get("first_name", "").strip()
-            last_name = fields.get("last_name", "").strip()
+            first_name = (fields.get("first_name") or "").strip()
+            last_name = (fields.get("last_name") or "").strip()
             if not first_name or not last_name:
                 return SwaigFunctionResult("Missing name. Cannot save profile.")
 
-            home_airport_name = fields.get("home_airport_name", "")
+            # Extract home airport IATA — try "(SFO)" format, then bare 3-letter code
+            home_airport_name = fields.get("home_airport_name") or ""
             home_airport_iata = None
             iata_match = re.search(r"\(([A-Z]{3})\)", home_airport_name)
+            if not iata_match:
+                iata_match = re.search(r"\b([A-Za-z]{3})\b", home_airport_name)
             if iata_match:
-                home_airport_iata = iata_match.group(1)
+                home_airport_iata = iata_match.group(1).upper()
 
             create_passenger(
                 phone=caller_phone,
@@ -931,41 +940,28 @@ class VoyagerAgent(AgentBase):
                 "home_airport_iata": home_airport_iata, "home_airport_name": home_airport_name,
             }
 
-            result.update_global_data({
+            global_update = {
                 "passenger_profile": profile,
                 "is_new_caller": False,
                 "caller_phone": caller_phone,
-            })
+            }
 
-            # Pre-set origin from home airport so get_origin can confirm it
+            # If home airport resolved, tell AI to offer it — but don't pre-set
+            # state["origin"] to avoid stale data if caller declines
             if home_airport_iata and home_airport_name:
-                call_id = _call_id(raw_data)
-                state = load_call_state(call_id)
-                state["origin"] = {
-                    "iata": home_airport_iata,
-                    "name": home_airport_name,
-                }
-                save_call_state(call_id, state)
-                _sync_summary(result, state)
-
                 result = SwaigFunctionResult(
                     f"Profile saved for {first_name} {last_name}. "
                     f"Their home airport is {home_airport_name} ({home_airport_iata}). "
-                    f"Confirm with the caller: 'Would you like to fly from {home_airport_name} today, or somewhere else?' "
-                    "If they confirm, move to get_destination. If they want a different airport, "
-                    "call resolve_location with their answer and location_type='origin'."
+                    f"Ask the caller: 'Would you like to fly from {home_airport_name} today, or somewhere else?' "
+                    f"If they confirm, call resolve_location with '{home_airport_name}' and location_type='origin'. "
+                    "If they want a different airport, ask where and call resolve_location with their answer."
                 )
-                result.update_global_data({
-                    "passenger_profile": profile,
-                    "is_new_caller": False,
-                    "caller_phone": caller_phone,
-                })
-                _change_step(result, "get_origin")
-                return result
+            else:
+                result = SwaigFunctionResult(
+                    f"Profile saved for {first_name} {last_name}. Now ask where they'd like to fly."
+                )
 
-            result = SwaigFunctionResult(
-                f"Profile saved for {first_name} {last_name}. Now ask where they'd like to fly."
-            )
+            result.update_global_data(global_update)
             _change_step(result, "get_origin")
             return result
 
@@ -985,10 +981,17 @@ class VoyagerAgent(AgentBase):
             skill_key = "skill:roundtrip" if trip_type == "round_trip" else "skill:oneway"
             skill_data = global_data.get(skill_key, {})
             answers = skill_data.get("answers", [])
-            fields = {a["key_name"]: a["answer"] for a in answers}
+            fields = {
+                a.get("key_name"): a.get("answer")
+                for a in answers
+                if a.get("key_name") and a.get("answer")
+            }
 
             state["departure_date"] = fields.get("departure_date")
-            adults = int(fields.get("adults", "1"))
+            try:
+                adults = int(fields.get("adults", "1"))
+            except (ValueError, TypeError):
+                adults = 1
             if adults > 8:
                 result = SwaigFunctionResult(
                     f"We can only book up to 8 passengers at a time. "
@@ -1224,11 +1227,10 @@ class VoyagerAgent(AgentBase):
                 f"The confirmed price is ${total} {currency} per person including taxes. "
                 f"{baggage_info}"
                 "Tell the caller the price and ask: 'Shall I book this?' "
-                "If yes, proceed to booking."
+                "If yes, move to create_booking. If no, move back to present_options."
             )
             save_call_state(call_id, state)
             _sync_summary(result, state)
-            _change_step(result,"create_booking")
             return result
 
         # 6. BOOK FLIGHT
