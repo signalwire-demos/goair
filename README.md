@@ -214,11 +214,11 @@ A single-page web dashboard at `/` shows all bookings with:
 | `select_airport` | `location_type`, `iata_code` | Pick one airport from disambiguation candidates |
 | `select_trip_type` | `trip_type` | Record round-trip or one-way, branch to the correct booking flow |
 | `finalize_profile` | (none) | Read info_gatherer answers from `global_data`, create passenger record in SQLite, populate `global_data.passenger_profile` |
-| `finalize_booking` | (none) | Read info_gatherer answers from `global_data`, store booking details in call state |
+| `finalize_booking` | (none) | Read info_gatherer answers from `global_data`, validate dates (rejects past dates, return before departure), store booking details in call state |
 | `search_flights` | (none) | Search using stored state, returns up to 3 voice-friendly summaries |
 | `select_flight` | `option_number` | Lock in the caller's choice (1, 2, or 3) |
 | `get_flight_price` | (none) | Confirm live price via mock pricing API |
-| `book_flight` | (none) | Book flight + SMS confirmation. Uses passenger profile from `global_data` |
+| `book_flight` | (none) | Book flight + SMS confirmation. Uses passenger profile from `global_data`. Filler: "Booking that for you now" (en-US) |
 | `summarize_conversation` | `summary` | Post-call summary (called automatically) |
 
 The `info_gatherer` skill also registers its own tools per prefix: `{prefix}_start_questions` and `{prefix}_submit_answer`. These are managed by the skill and called by the AI during profile/booking collection steps.
@@ -265,7 +265,9 @@ SWML_PROXY_URL_BASE=https://your-public-url.ngrok.io
 GOOGLE_MAPS_API_KEY=your-google-key
 
 # AI Model
-AI_MODEL=gpt-4o-mini
+AI_MODEL=gpt-oss-120b
+AI_TOP_P=0.5
+AI_TEMPERATURE=0.5
 
 # Mock API — enable randomized delays to simulate Amadeus latency (default: false)
 MOCK_DELAYS=false
@@ -346,6 +348,9 @@ goair/
 ├── config.py             # Environment variable loader
 ├── requirements.txt      # Python dependencies
 ├── .env.example          # Environment template
+├── test_flow.sh          # SWAIG function integration tests (swaig-test CLI)
+├── test_roundtrip.py     # Roundtrip booking flow unit tests
+├── INFO.md               # Detailed technical reference (APIs, state machine, resolution pipeline)
 ├── Procfile              # Heroku/Dokku process definition
 ├── app.json              # Heroku app manifest
 ├── CHECKS                # Dokku zero-downtime deploy health check

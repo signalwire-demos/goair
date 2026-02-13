@@ -1283,6 +1283,7 @@ class VoyagerAgent(AgentBase):
             name="book_flight",
             description="Book the confirmed flight and create a PNR.",
             wait_file="/sounds/typing.mp3",
+            fillers={"en-US": ["Booking that for you now"]},
             parameters={
                 "type": "object",
                 "properties": {},
