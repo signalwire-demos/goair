@@ -202,7 +202,7 @@ run --raw --call-id "${CALL_ID}-igp" --custom-data "$(cd_gd)" --exec profile_sub
 check "date_of_birth unconfirmed → rejected" "confirm"
 
 # date_of_birth WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --answer "1990-01-01" --confirmed true
+run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --answer "1990-01-01" --confirmed_by_user true
 check "date_of_birth confirmed → advances" "male\|female\|gender"
 
 # gender
@@ -210,7 +210,7 @@ run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --an
 check "gender → advances to email" "email"
 
 # email WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --answer "test@example.com" --confirmed true
+run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --answer "test@example.com" --confirmed_by_user true
 check "email confirmed → advances to seat" "seat\|window\|aisle"
 
 # seat_preference
@@ -222,7 +222,7 @@ run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --an
 check "cabin_preference → advances to airport" "airport\|fly from"
 
 # home_airport_name WITH confirmation → last question → completion
-run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --answer "Tulsa International (TUL)" --confirmed true
+run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --answer "Tulsa International (TUL)" --confirmed_by_user true
 check "home_airport → completion message" "finalize_profile"
 
 # finalize with accumulated answers
@@ -324,7 +324,7 @@ run_and_merge --raw --call-id "${CALL_ID}-igb" --exec oneway_start_questions
 check "start_questions → asks departure" "depart"
 
 # departure_date WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-igb" --exec oneway_submit_answer --answer "$DEP_DATE" --confirmed true
+run_and_merge --raw --call-id "${CALL_ID}-igb" --exec oneway_submit_answer --answer "$DEP_DATE" --confirmed_by_user true
 check "departure_date → advances to passengers" "passenger\|how many"
 
 # adults
@@ -370,11 +370,11 @@ run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_start_questions
 check "start_questions → asks departure" "depart"
 
 # departure_date WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "$DEP_DATE" --confirmed true
+run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "$DEP_DATE" --confirmed_by_user true
 check "departure_date → advances to return" "return"
 
 # return_date WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "$RET_DATE" --confirmed true
+run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "$RET_DATE" --confirmed_by_user true
 check "return_date → advances to passengers" "passenger\|how many"
 
 # adults
