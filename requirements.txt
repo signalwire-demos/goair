@@ -1,4 +1,4 @@
-signalwire-agents==1.0.18.dev22
+signalwire-agents==1.0.18.dev29
 amadeus>=12.0.0
 requests>=2.31.0
 python-dotenv>=1.0.0

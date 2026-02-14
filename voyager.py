@@ -175,7 +175,7 @@ class VoyagerAgent(AgentBase):
         # AI model
         self.set_param("ai_model", config.AI_MODEL)
         self.set_param("end_of_speech_timeout", 500)
-        self.set_prompt_llm_params(top_p=0.3, temperature=0.3)
+        self.set_prompt_llm_params(top_p=0.9, temperature=0.3)
 
         # Personality
         self.prompt_add_section("Personality",
@@ -207,7 +207,6 @@ class VoyagerAgent(AgentBase):
         # info_gatherer skills — declarative question sets replace per-field handlers
         self.add_skill("info_gatherer", {
             "prefix": "profile",
-            "skip_prompt": True,
             "questions": [
                 {"key_name": "first_name", "question_text": "What is your first name?"},
                 {"key_name": "last_name", "question_text": "What is your last name?"},
@@ -223,7 +222,7 @@ class VoyagerAgent(AgentBase):
                  "prompt_add": "Submit exactly ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST."},
                 {"key_name": "home_airport_name", "question_text": "What airport do you usually fly from?",
                  "confirm": True,
-                 "prompt_add": "After the caller answers, call resolve_location with their answer to resolve it to an IATA code. "
+                 "prompt_add": "After the user answers, call resolve_location with their answer to resolve it to an IATA code. "
                                "Submit the answer as 'Airport Name (IATA)' format, e.g. 'San Francisco International (SFO)'. "
                                "If multiple airports are returned, ask which one they mean before submitting."},
             ],
@@ -232,7 +231,6 @@ class VoyagerAgent(AgentBase):
 
         self.add_skill("info_gatherer", {
             "prefix": "oneway",
-            "skip_prompt": True,
             "questions": [
                 {"key_name": "departure_date", "question_text": "When would you like to depart?",
                  "confirm": True,
@@ -247,7 +245,6 @@ class VoyagerAgent(AgentBase):
 
         self.add_skill("info_gatherer", {
             "prefix": "roundtrip",
-            "skip_prompt": True,
             "questions": [
                 {"key_name": "departure_date", "question_text": "When would you like to depart?",
                  "confirm": True,
@@ -498,38 +495,37 @@ class VoyagerAgent(AgentBase):
                 "caller_phone": caller_phone,
             })
 
-            # RETURNING CALLER — configure steps with concrete data, no prompt-level conditionals
+            # RETURNING CALLER — greeting IS the origin collection step
             ctx = agent._contexts_builder.get_context("default")
 
-            # Greeting: greet by name, then immediately move to get_origin
             greeting_step = ctx.get_step("greeting")
-            greeting_step.set_functions("none")
-            greeting_step.set_valid_steps(["get_origin"])
-            greeting_step.add_bullets("Process", [
-                f"Say: 'Welcome back {passenger['first_name']}! Let me help you book a flight.'",
-                "Immediately move to get_origin — do NOT ask any booking questions here",
-            ])
-            greeting_step.set_step_criteria("Caller greeted")
+            greeting_step._sections = []  # Clear base shell
+            greeting_step.set_functions(["resolve_location"])
+            greeting_step.set_valid_steps(["disambiguate_origin", "get_destination"])
 
-            # Disable profile collection — caller is already known
-            collect_profile_step = ctx.get_step("collect_profile")
-            collect_profile_step.set_functions("none")
-            collect_profile_step.set_valid_steps([])
-
-            # Get origin: prefer home airport for returning callers
             home_airport = passenger.get("home_airport_name")
             if home_airport:
-                get_origin_step = ctx.get_step("get_origin")
-                get_origin_step._sections = []  # Clear generic "ask where" instructions
-                get_origin_step.add_section("Task", "Confirm or collect the departure airport")
-                get_origin_step.add_bullets("Process", [
+                greeting_step.add_section("Task", "Welcome the caller and confirm departure airport")
+                greeting_step.add_bullets("Process", [
+                    f"Say: 'Welcome back {passenger['first_name']}! Let me help you book a flight.'",
                     f"The caller's home airport is {home_airport} — offer this first",
-                    f"Say: 'Are you flying from {home_airport} today, or somewhere else?'",
-                    f"If they confirm, call resolve_location with '{home_airport}' and location_type='origin' — the caller already confirmed, so move straight to get_destination after it saves",
+                    f"Ask: 'Are you flying from {home_airport} today, or somewhere else?'",
+                    f"If they confirm, call resolve_location with '{home_airport}' and location_type='origin'",
                     "If they want a different airport, ask where and call resolve_location with their answer",
-                    "After resolve_location returns for a non-home airport, tell the caller which airport was found and ask if that's correct",
+                    "After resolve_location returns, tell the caller which airport was found and ask if that's correct",
                     "If they confirm, move to get_destination",
                 ])
+            else:
+                greeting_step.add_section("Task", "Welcome the caller and collect departure airport")
+                greeting_step.add_bullets("Process", [
+                    f"Say: 'Welcome back {passenger['first_name']}! Let me help you book a flight.'",
+                    "Ask where they're flying from, then call resolve_location with location_type='origin'",
+                    "After resolve_location returns, tell the caller which airport was found and ask if that's correct",
+                    "If they confirm, move to get_destination",
+                    "If multiple airports are returned, move to disambiguate_origin",
+                ])
+
+            greeting_step.set_step_criteria("Origin airport resolved and confirmed")
 
             agent.prompt_add_section("Passenger Profile", "${global_data.passenger_profile}")
 
@@ -541,22 +537,29 @@ class VoyagerAgent(AgentBase):
                 "caller_phone": caller_phone,
             })
 
-            # NEW CALLER — start directly in collect_profile, greeting folded in
+            # NEW CALLER — greeting IS the profile collection step
             ctx = agent._contexts_builder.get_context("default")
 
             greeting_step = ctx.get_step("greeting")
-            greeting_step.set_functions(["profile_start_questions"])
-            greeting_step.set_valid_steps(["collect_profile"])
+            greeting_step._sections = []  # Clear base shell
+            greeting_step.add_section("Task", "Welcome the caller and collect their profile")
+            greeting_step.set_functions(["profile_start_questions", "profile_submit_answer",
+                                         "finalize_profile", "resolve_location"])
+            greeting_step.set_valid_steps(["get_origin"])
             greeting_step.add_bullets("Process", [
-                "Say: 'Welcome to Voyager! I'd love to help you book a flight. Let me get your profile set up.'",
-                "Then immediately call profile_start_questions to begin collecting their information",
+                "Say: 'Welcome to Voyager! I'd love to help you book a flight. "
+                "Let me get your profile set up.'",
+                "Then immediately call profile_start_questions to begin",
+                "Ask each question as instructed, then call profile_submit_answer with the caller's response",
+                "When the caller answers the home airport question, call resolve_location to validate it before submitting",
+                "When all questions are answered, call finalize_profile to save the record",
             ])
-            greeting_step.set_step_criteria("Caller greeted and profile_start_questions called")
+            greeting_step.set_step_criteria("All profile questions answered and finalize_profile called")
 
+            # Disable standalone collect_profile — greeting handles it
             collect_profile_step = ctx.get_step("collect_profile")
-            collect_profile_step.add_bullets("Process", [
-                "The first question has already been returned by profile_start_questions — ask it now",
-            ])
+            collect_profile_step.set_functions("none")
+            collect_profile_step.set_valid_steps([])
 
     def _define_tools(self):
         """Define all SWAIG tool functions."""
@@ -607,8 +610,7 @@ class VoyagerAgent(AgentBase):
         # 1. RESOLVE LOCATION
         @self.tool(
             name="resolve_location",
-            description="Resolve a spoken city or place name to IATA airport code(s). "
-                        "Uses Google Maps for geocoding and airport database lookup.",
+            description="Resolve a spoken city or place name" ,
             wait_file="/sounds/typing.mp3",
             parameters={
                 "type": "object",
