@@ -309,7 +309,7 @@ class VoyagerAgent(AgentBase):
         greeting = ctx.add_step("greeting")
         greeting.add_section("Task", "Welcome the caller")
         greeting.set_functions("none")
-        greeting.set_valid_steps(["profile_last_name", "get_destination", "disambiguate_origin"])  # overridden by _per_call_config
+        greeting.set_valid_steps(["collect_profile", "get_destination", "disambiguate_origin"])  # overridden by _per_call_config
 
         # GET ORIGIN
         get_origin = ctx.add_step("get_origin")
@@ -378,7 +378,7 @@ class VoyagerAgent(AgentBase):
         ])
         collect_trip_type.set_step_criteria("Trip type confirmed and submitted via select_trip_type")
         collect_trip_type.set_functions(["select_trip_type"])
-        collect_trip_type.set_valid_steps(["booking_departure"])
+        collect_trip_type.set_valid_steps(["collect_booking"])
 
         # SEARCH FLIGHTS
         search_flights_step = ctx.add_step("search_flights")
@@ -405,7 +405,7 @@ class VoyagerAgent(AgentBase):
         ])
         present_options.set_step_criteria("Caller selects an option via select_flight or requests new search via restart_search")
         present_options.set_functions(["select_flight", "restart_search"])
-        present_options.set_valid_steps(["confirm_price", "booking_departure", "get_origin"])
+        present_options.set_valid_steps(["confirm_price", "collect_booking", "get_origin"])
 
         # CONFIRM PRICE
         confirm_price = ctx.add_step("confirm_price")
@@ -446,7 +446,7 @@ class VoyagerAgent(AgentBase):
         ])
         error_recovery.set_step_criteria("Recovery action taken")
         error_recovery.set_functions(["search_flights", "restart_booking", "restart_search"])
-        error_recovery.set_valid_steps(["present_options", "booking_departure", "get_origin"])
+        error_recovery.set_valid_steps(["present_options", "collect_booking", "get_origin"])
 
         # WRAP UP
         wrap_up = ctx.add_step("wrap_up")
@@ -459,201 +459,84 @@ class VoyagerAgent(AgentBase):
         wrap_up.set_valid_steps([])
 
     def _define_question_steps(self):
-        """Create one-step-per-question flows for profile and booking collection."""
+        """Define profile and booking collection using gather_info mode."""
         ctx = self._contexts_builder.get_context("default")
-        _agent = self  # local ref for closures
 
-        def _call_id(raw_data):
-            if not isinstance(raw_data, dict):
-                return "unknown"
-            return raw_data.get("call_id", "unknown")
+        # ── Profile Collection (gather_info mode) ──
 
-        # ── Validators (all take value, raw_data) ──
+        ctx.add_step("collect_profile") \
+            .set_text("Now let's start booking your flight.") \
+            .set_gather_info(
+                output_key="profile_answers",
+                completion_action="next_step",
+                prompt="Welcome to Voyager! I'd love to help you book a flight. "
+                       "Let me get your profile set up first."
+            ) \
+            .add_gather_question("first_name", "What is your first name?") \
+            .add_gather_question("last_name", "What is your last name?") \
+            .add_gather_question(
+                "date_of_birth",
+                "What is your date of birth?",
+                confirm=True,
+                prompt="Accept natural language but submit in YYYY-MM-DD format"
+            ) \
+            .add_gather_question(
+                "gender",
+                "Are you male or female?",
+                prompt="Submit exactly MALE or FEMALE"
+            ) \
+            .add_gather_question(
+                "email",
+                "What email should we send confirmations to?",
+                confirm=True
+            ) \
+            .add_gather_question(
+                "seat_preference",
+                "Do you prefer a window or aisle seat?",
+                prompt="Submit exactly WINDOW or AISLE"
+            ) \
+            .add_gather_question(
+                "cabin_preference",
+                "What cabin class do you usually fly?",
+                prompt="Options are ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST"
+            ) \
+            .add_gather_question(
+                "home_airport",
+                "What airport do you usually fly from?",
+                confirm=True,
+                prompt="Accept city or airport name. Format answer as 'Airport Name (CODE)'"
+            ) \
+            .set_valid_steps(["save_profile_step"])
 
-        def _not_empty(value, raw_data):
-            if not value:
-                return "No answer provided. Ask the caller again."
-            return None
+        # Save profile after gather completes
+        ctx.add_step("save_profile_step") \
+            .add_section("Task", "Save the completed profile") \
+            .add_bullets("Process", [
+                "Call save_profile to create the passenger record",
+                "Profile data is in ${profile_answers}"
+            ]) \
+            .set_functions(["save_profile"]) \
+            .set_valid_steps(["get_origin"])
 
-        def _date_format(value, raw_data):
-            try:
-                date.fromisoformat(value)
-            except (ValueError, TypeError):
-                return f"'{value}' is not a valid date. Must be YYYY-MM-DD format. Ask the caller again."
-            return None
-
-        def _gender_val(value, raw_data):
-            if value.upper() not in ("MALE", "FEMALE"):
-                return "Must be MALE or FEMALE. Ask the caller again."
-            return None
-
-        def _seat_val(value, raw_data):
-            if value.upper() not in ("WINDOW", "AISLE"):
-                return "Must be WINDOW or AISLE. Ask the caller again."
-            return None
-
-        def _cabin_val(value, raw_data):
-            if value.upper() not in ("ECONOMY", "PREMIUM_ECONOMY", "BUSINESS", "FIRST"):
-                return "Must be ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST. Ask the caller again."
-            return None
-
-        def _date_not_past(value, raw_data):
-            err = _date_format(value, raw_data)
-            if err:
-                return err
-            if date.fromisoformat(value) < date.today():
-                return f"The date {value} is in the past. Ask for a future date."
-            return None
-
-        def _return_date_val(value, raw_data):
-            err = _date_not_past(value, raw_data)
-            if err:
-                return err
-            global_data = (raw_data or {}).get("global_data", {})
-            answers = global_data.get("booking_answers", {})
-            dep_str = answers.get("departure_date", "")
-            if dep_str:
-                try:
-                    if date.fromisoformat(value) <= date.fromisoformat(dep_str):
-                        return (f"Return date {value} must be after departure date {dep_str}. "
-                                "Ask for a later date.")
-                except ValueError:
-                    pass
-            return None
-
-        def _integer_1_8(value, raw_data):
-            try:
-                n = int(value)
-            except (ValueError, TypeError):
-                return "Must be a number between 1 and 8. Ask the caller again."
-            if n < 1 or n > 8:
-                return ("Must be between 1 and 8. For larger parties, "
-                        "tell the caller to contact a travel agent.")
-            return None
-
-        # ── Profile question steps (8) ──
-
-        self._add_question_step(ctx, "profile_first_name",
-            task="Collect the caller's first name",
-            question="What is your first name?",
-            tool_name="submit_first_name", key_name="first_name",
-            storage_ns="profile_answers", next_step="profile_last_name",
-            validator=_not_empty).set_valid_steps(["profile_last_name"])
-
-        self._add_question_step(ctx, "profile_last_name",
-            task="Collect the caller's last name",
-            question="What is your last name?",
-            tool_name="submit_last_name", key_name="last_name",
-            storage_ns="profile_answers", next_step="profile_dob",
-            validator=_not_empty).set_valid_steps(["profile_dob"])
-
-        self._add_question_step(ctx, "profile_dob",
-            task="Collect the caller's date of birth",
-            question="What is your date of birth including month, day, and year?",
-            tool_name="submit_dob", key_name="date_of_birth",
-            storage_ns="profile_answers", next_step="profile_gender",
-            confirm=True, validator=_date_format,
-            extra_instructions=["Accept natural language but submit in YYYY-MM-DD format"]
-        ).set_valid_steps(["profile_gender"])
-
-        self._add_question_step(ctx, "profile_gender",
-            task="Collect the caller's gender",
-            question="Are you male or female?",
-            tool_name="submit_gender", key_name="gender",
-            storage_ns="profile_answers", next_step="profile_email",
-            validator=_gender_val,
-            extra_instructions=["Submit exactly MALE or FEMALE"]
-        ).set_valid_steps(["profile_email"])
-
-        self._add_question_step(ctx, "profile_email",
-            task="Collect the caller's email address",
-            question="What email should we send confirmations to?",
-            tool_name="submit_email", key_name="email",
-            storage_ns="profile_answers", next_step="profile_seat_pref",
-            confirm=True, validator=_not_empty
-        ).set_valid_steps(["profile_seat_pref"])
-
-        self._add_question_step(ctx, "profile_seat_pref",
-            task="Collect the caller's seat preference",
-            question="Do you prefer a window or aisle seat?",
-            tool_name="submit_seat_pref", key_name="seat_preference",
-            storage_ns="profile_answers", next_step="profile_cabin_pref",
-            validator=_seat_val,
-            extra_instructions=["Submit exactly WINDOW or AISLE"]
-        ).set_valid_steps(["profile_cabin_pref"])
-
-        self._add_question_step(ctx, "profile_cabin_pref",
-            task="Collect the caller's cabin preference",
-            question="What cabin class do you usually fly?",
-            tool_name="submit_cabin_pref", key_name="cabin_preference",
-            storage_ns="profile_answers", next_step="profile_home_airport",
-            validator=_cabin_val,
-            extra_instructions=["Submit exactly ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST"]
-        ).set_valid_steps(["profile_home_airport"])
-
-        # profile_home_airport — custom handler (creates passenger inline)
-        ha_step = ctx.add_step("profile_home_airport")
-        ha_step.add_section("Task", "Collect the caller's home airport")
-        ha_step.add_bullets("Process", [
-            "Ask the caller: 'What airport do you usually fly from?'",
-            "Call resolve_location with their answer first to validate it",
-            "Submit in 'Airport Name (IATA)' format, e.g. 'San Francisco International (SFO)'",
-            "Read back the airport and ask them to confirm it is correct",
-            "Call submit_home_airport with the confirmed answer",
-        ])
-        ha_step.set_step_criteria("Answer submitted via submit_home_airport")
-        ha_step.set_functions(["resolve_location", "submit_home_airport"])
-        ha_step.set_valid_steps(["get_origin"])
-
-        @self.tool(name="submit_home_airport",
-                   description="Submit the caller's home airport",
-                   wait_file="/sounds/typing.mp3",
-                   parameters={"type": "object", "properties": {
-                       "value": {"type": "string",
-                                 "description": "Home airport in 'Airport Name (IATA)' format"},
-                       "confirmed": {"type": "boolean",
-                                     "description": "Set true only after the caller explicitly confirmed"},
-                   }, "required": ["value"]})
-        def _submit_home_airport(args, raw_data):
-            value = (args.get("value") or "").strip()
-            confirmed = args.get("confirmed", False)
-
-            # Server-side guard: first call ALWAYS bounces
-            call_id = ((raw_data or {}).get("call_id", "unknown")
-                       if isinstance(raw_data, dict) else "unknown")
-            _state = load_call_state(call_id)
-            if not _state.get("_home_airport_asked"):
-                _state["_home_airport_asked"] = True
-                save_call_state(call_id, _state)
-                return SwaigFunctionResult(
-                    "Ask the caller for their home airport. "
-                    "Then call resolve_location with their answer first, "
-                    "then call submit_home_airport with confirmed set to true."
-                )
-            if not confirmed:
-                return SwaigFunctionResult(
-                    f"Read '{value}' back to the caller and ask if that's correct. "
-                    "Then call submit_home_airport again with confirmed set to true."
-                )
-            # Clear the asked flag
-            _state.pop("_home_airport_asked", None)
-            save_call_state(call_id, _state)
-            if not value:
-                return SwaigFunctionResult("No answer provided. Ask the caller again.")
-
+        @self.tool(name="save_profile",
+                   description="Save profile and create passenger",
+                   wait_file="/sounds/typing.mp3")
+        def _save_profile(args, raw_data):
             global_data = (raw_data or {}).get("global_data", {})
             caller_phone = global_data.get("caller_phone", "")
-            answers = dict(global_data.get("profile_answers", {}))
-            answers["home_airport_name"] = value
+            answers = global_data.get("profile_answers", {})
+
+            home_airport_value = answers.get("home_airport", "")
 
             # Extract IATA code
             home_airport_iata = None
-            iata_match = re.search(r"\(([A-Z]{3})\)", value)
+            iata_match = re.search(r"\(([A-Z]{3})\)", home_airport_value)
             if not iata_match:
-                iata_match = re.search(r"\b([A-Za-z]{3})\b", value)
+                iata_match = re.search(r"\b([A-Za-z]{3})\b", home_airport_value)
             if iata_match:
                 home_airport_iata = iata_match.group(1).upper()
 
+            # Create passenger
             create_passenger(
                 phone=caller_phone,
                 first_name=answers.get("first_name", ""),
@@ -664,7 +547,7 @@ class VoyagerAgent(AgentBase):
                 seat_preference=answers.get("seat_preference"),
                 cabin_preference=answers.get("cabin_preference"),
                 home_airport_iata=home_airport_iata,
-                home_airport_name=value,
+                home_airport_name=home_airport_value,
             )
 
             profile = {
@@ -677,131 +560,76 @@ class VoyagerAgent(AgentBase):
                 "seat_preference": answers.get("seat_preference"),
                 "cabin_preference": answers.get("cabin_preference"),
                 "home_airport_iata": home_airport_iata,
-                "home_airport_name": value,
+                "home_airport_name": home_airport_value,
             }
 
             result = SwaigFunctionResult(
-                f"Profile saved for {answers.get('first_name', '')} {answers.get('last_name', '')}. "
-                f"Home airport: {value}."
+                f"Profile saved for {answers.get('first_name', '')} {answers.get('last_name', '')}."
             )
             result.update_global_data({
-                "profile_answers": answers,
                 "passenger_profile": profile,
                 "is_new_caller": False,
-                "caller_phone": caller_phone,
             })
             result.swml_change_step("get_origin")
             return result
 
-        # ── Booking question steps (4) ──
+        # ── Booking Collection (gather_info mode) ──
 
-        def _departure_next(raw_data):
-            cid = _call_id(raw_data)
-            st = load_call_state(cid)
-            return "booking_return" if st.get("trip_type") == "round_trip" else "booking_adults"
+        ctx.add_step("collect_booking") \
+            .set_text("Search for flights.") \
+            .set_gather_info(
+                output_key="booking_answers",
+                completion_action="next_step",
+                prompt="Now let's plan your trip."
+            ) \
+            .add_gather_question(
+                "departure_date",
+                "When would you like to depart?",
+                confirm=True,
+                prompt="Accept natural language but submit in YYYY-MM-DD format. Must be a future date."
+            ) \
+            .add_gather_question(
+                "return_date",
+                "When would you like to return?",
+                confirm=True,
+                prompt="Accept natural language but submit in YYYY-MM-DD format. Must be after departure date. "
+                       "For one-way trips, submit the word ONEWAY instead of a date."
+            ) \
+            .add_gather_question(
+                "adults",
+                "How many passengers?",
+                type="integer",
+                prompt="Must be 1-8 passengers"
+            ) \
+            .add_gather_question(
+                "cabin_class",
+                "What cabin class?",
+                prompt="Options: ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST. "
+                       "Suggest the passenger's stored preference if available in ${passenger_profile}"
+            ) \
+            .set_valid_steps(["search_and_present"])
 
-        self._add_question_step(ctx, "booking_departure",
-            task="Collect the departure date",
-            question="When would you like to depart?",
-            tool_name="submit_departure", key_name="departure_date",
-            storage_ns="booking_answers", next_step=_departure_next,
-            confirm=True, validator=_date_not_past,
-            extra_instructions=["Accept natural language but submit in YYYY-MM-DD format",
-                                "After submission: round-trip goes to booking_return, one-way skips to booking_adults",
-                                "If the caller wants to change route, call restart_search"],
-            extra_functions=["restart_search"]
-        ).set_valid_steps(["booking_return", "booking_adults", "get_origin"])
-
-        self._add_question_step(ctx, "booking_return",
-            task="Collect the return date",
-            question="And when would you like to return?",
-            tool_name="submit_return", key_name="return_date",
-            storage_ns="booking_answers", next_step="booking_adults",
-            confirm=True, validator=_return_date_val,
-            extra_instructions=["Accept natural language but submit in YYYY-MM-DD format",
-                                "Must be after the departure date",
-                                "If the caller wants to change route or start over, call restart_search"],
-            extra_functions=["restart_search"]
-        ).set_valid_steps(["booking_adults", "booking_departure", "get_origin"])
-
-        self._add_question_step(ctx, "booking_adults",
-            task="Collect the number of passengers",
-            question="How many passengers will be traveling?",
-            tool_name="submit_adults", key_name="adults",
-            storage_ns="booking_answers", next_step="booking_cabin",
-            validator=_integer_1_8,
-            extra_instructions=["Submit as a positive integer (1-8)",
-                                "Maximum 8 — for larger parties, tell the caller to contact a travel agent",
-                                "If the caller wants to change route or dates, call restart_search"],
-            extra_functions=["restart_search"]
-        ).set_valid_steps(["booking_cabin", "booking_departure", "get_origin"])
-
-        # booking_cabin — custom handler (saves to SQLite, transitions to search)
-        bc_step = ctx.add_step("booking_cabin")
-        bc_step.add_section("Task", "Collect the cabin class for the flight search")
-        bc_step.add_bullets("Process", [
-            "Ask the caller: 'What cabin class would you like — economy, premium economy, business, or first?'",
-            "If the passenger has a stored cabin preference in their profile, suggest it",
-            "Call submit_cabin with their answer",
-            "If the caller wants to change route or dates, call restart_search",
-        ])
-        bc_step.set_step_criteria("Answer submitted via submit_cabin")
-        bc_step.set_functions(["submit_cabin", "restart_search"])
-        bc_step.set_valid_steps(["present_options", "error_recovery", "booking_departure", "get_origin"])
-
-        @self.tool(name="submit_cabin",
-                   description="Submit the caller's cabin class preference",
-                   wait_file="/sounds/typing.mp3",
-                   parameters={"type": "object", "properties": {
-                       "value": {"type": "string",
-                                 "description": "Cabin class: ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST"},
-                   }, "required": ["value"]})
-        def _submit_cabin(args, raw_data):
-            value = (args.get("value") or "").strip().upper()
-            if value not in ("ECONOMY", "PREMIUM_ECONOMY", "BUSINESS", "FIRST"):
-                return SwaigFunctionResult(
-                    "Must be ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST. Ask the caller again."
-                )
-
-            global_data = (raw_data or {}).get("global_data", {})
-            answers = dict(global_data.get("booking_answers", {}))
-            answers["cabin_class"] = value
-
-            # Save booking fields to SQLite call state
-            call_id = _call_id(raw_data)
-            state = load_call_state(call_id)
-            state["departure_date"] = answers.get("departure_date", "")
-            if answers.get("return_date"):
-                state["return_date"] = answers["return_date"]
-            try:
-                state["adults"] = int(answers.get("adults", "1"))
-            except (ValueError, TypeError):
-                state["adults"] = 1
-            state["cabin_class"] = value
-            save_call_state(call_id, state)
-
-            # Run the search inline — skip the search_flights step entirely
-            result = _agent._do_search(call_id, state)
-            result.update_global_data({
-                "booking_answers": answers,
-                "booking_state": build_ai_summary(state),
-            })
-            return result
+        # Search flights after booking details collected
+        ctx.add_step("search_and_present") \
+            .add_section("Task", "Search for available flights") \
+            .add_bullets("Process", [
+                "Booking details are in ${booking_answers}",
+                "Call search_flights to find available flights",
+                "The search will return up to 3 options and transition to present_options"
+            ]) \
+            .set_step_criteria("Search completed") \
+            .set_functions(["search_flights"]) \
+            .set_valid_steps(["present_options", "error_recovery"])
 
     def _per_call_config(self, query_params, body_params, headers, agent):
-        """Pre-populate passenger data on an ephemeral agent copy.
-
-        The SDK deep-copies the POM, global_data, hints, etc. into `agent`
-        before calling this. All mutations here are per-request and never
-        leak into the shared instance or other concurrent calls.
-        """
+        """Pre-populate passenger data for returning callers."""
         call_data = (body_params or {}).get("call", {})
         caller_phone = call_data.get("from", "")
 
         passenger = get_passenger_by_phone(caller_phone) if caller_phone else None
 
         if passenger:
-            # RETURNING CALLER — build profile dict
+            # RETURNING CALLER — skip profile collection
             profile = {
                 "phone": passenger["phone"],
                 "first_name": passenger["first_name"],
@@ -821,76 +649,66 @@ class VoyagerAgent(AgentBase):
                 "caller_phone": caller_phone,
             })
 
-            # RETURNING CALLER — greeting IS the origin collection step
+            # Modify greeting to skip profile collection
             ctx = agent._contexts_builder.get_context("default")
-
             greeting_step = ctx.get_step("greeting")
-            greeting_step._sections = []  # Clear base shell
+            greeting_step._sections = []
             greeting_step.set_functions(["resolve_location"])
             greeting_step.set_valid_steps(["get_destination", "disambiguate_origin"])
 
             home_airport = passenger.get("home_airport_name")
             if home_airport:
-                greeting_step.add_section("Task", "Welcome the caller and confirm departure airport")
+                greeting_step.add_section("Task", "Welcome returning caller and confirm origin")
                 greeting_step.add_bullets("Process", [
-                    f"Say: 'Welcome back {passenger['first_name']}! Let me help you book a flight.'",
-                    f"The caller's home airport is {home_airport} — offer this first",
-                    f"Ask: 'Are you flying from {home_airport} today, or somewhere else?'",
-                    f"If they confirm, call resolve_location with '{home_airport}' and location_type='origin'",
-                    "If they want a different airport, ask where and call resolve_location with their answer",
-                    "After resolve_location returns, tell the caller which airport was found and ask if that's correct",
-                    "If they confirm, move to get_destination",
+                    f"Say: 'Welcome back {passenger['first_name']}!'",
+                    f"Ask: 'Are you flying from {home_airport} or somewhere else?'",
+                    f"If {home_airport}, call resolve_location with '{home_airport}' and location_type='origin'",
+                    "If different, ask where and call resolve_location",
+                    "After resolve_location, confirm with caller and proceed to get_destination"
                 ])
             else:
-                greeting_step.add_section("Task", "Welcome the caller and collect departure airport")
+                greeting_step.add_section("Task", "Welcome returning caller and get origin")
                 greeting_step.add_bullets("Process", [
-                    f"Say: 'Welcome back {passenger['first_name']}! Let me help you book a flight.'",
-                    "Ask where they're flying from, then call resolve_location with location_type='origin'",
-                    "After resolve_location returns, tell the caller which airport was found and ask if that's correct",
-                    "If they confirm, move to get_destination",
-                    "If multiple airports are returned, move to disambiguate_origin",
+                    f"Say: 'Welcome back {passenger['first_name']}!'",
+                    "Ask where they're flying from",
+                    "Call resolve_location with location_type='origin'",
+                    "Confirm and proceed to get_destination"
                 ])
 
-            greeting_step.set_step_criteria("Origin airport resolved and confirmed")
+            greeting_step.set_step_criteria("Origin resolved")
 
-            # Disable all profile steps — returning caller skips profile collection
-            for step_name in ["profile_first_name", "profile_last_name", "profile_dob",
-                              "profile_gender", "profile_email", "profile_seat_pref",
-                              "profile_cabin_pref", "profile_home_airport"]:
-                ps = ctx.get_step(step_name)
-                ps.set_functions("none")
-                ps.set_valid_steps([])
+            # Disable profile collection steps
+            for step_name in ["collect_profile", "save_profile_step"]:
+                try:
+                    ps = ctx.get_step(step_name)
+                    ps.set_functions("none")
+                    ps.set_valid_steps([])
+                except:
+                    pass
 
             agent.prompt_add_section("Passenger Profile", "${global_data.passenger_profile}")
 
         else:
-            # NEW CALLER
+            # NEW CALLER — use profile collection
             agent.update_global_data({
                 "passenger_profile": None,
                 "is_new_caller": True,
                 "caller_phone": caller_phone,
             })
 
-            # NEW CALLER — greeting IS the first-name question
+            # Greeting starts profile collection
             ctx = agent._contexts_builder.get_context("default")
-
             greeting_step = ctx.get_step("greeting")
-            greeting_step._sections = []  # Clear base shell
-            greeting_step.add_section("Task", "Welcome the caller and ask for their first name")
+            greeting_step._sections = []
+            greeting_step.add_section("Task", "Welcome new caller and start profile")
             greeting_step.add_bullets("Process", [
-                "Say: 'Welcome to Voyager! I'd love to help you book a flight. "
-                "Let me get your profile set up.'",
-                "Then ask: 'What is your first name?'",
-                "Call submit_first_name with their answer",
+                "Say: 'Welcome to Voyager! I'd love to help you book a flight.'",
+                "Explain you'll collect their profile",
+                "Move to collect_profile step"
             ])
-            greeting_step.set_functions(["submit_first_name"])
-            greeting_step.set_valid_steps(["profile_last_name"])
-            greeting_step.set_step_criteria("First name submitted via submit_first_name")
-
-            # Disable profile_first_name — greeting handles it
-            pf_step = ctx.get_step("profile_first_name")
-            pf_step.set_functions("none")
-            pf_step.set_valid_steps([])
+            greeting_step.set_functions("none")
+            greeting_step.set_valid_steps(["collect_profile"])
+            greeting_step.set_step_criteria("Ready to collect profile")
 
     def _define_tools(self):
         """Define all SWAIG tool functions."""
@@ -1239,7 +1057,7 @@ class VoyagerAgent(AgentBase):
             state["trip_type"] = trip_type
             save_call_state(call_id, state)
 
-            next_step = "booking_departure"
+            next_step = "collect_booking"
             result = SwaigFunctionResult(f"Got it — {trip_type.replace('_', ' ')}.")
             _sync_summary(result, state)
             _change_step(result, next_step)
@@ -1363,7 +1181,7 @@ class VoyagerAgent(AgentBase):
                     "Must be in YYYY-MM-DD format. Ask the caller again."
                 )
                 _sync_summary(result, state)
-                _change_step(result, "booking_departure")
+                _change_step(result, "collect_booking")
                 return result
             if departure_dt < date.today():
                 result = SwaigFunctionResult(
@@ -1371,7 +1189,7 @@ class VoyagerAgent(AgentBase):
                     "Ask the caller for a future departure date."
                 )
                 _sync_summary(result, state)
-                _change_step(result, "booking_departure")
+                _change_step(result, "collect_booking")
                 return result
             state["departure_date"] = departure_str
 
@@ -1386,7 +1204,7 @@ class VoyagerAgent(AgentBase):
                         "Must be in YYYY-MM-DD format. Ask the caller again."
                     )
                     _sync_summary(result, state)
-                    _change_step(result, "booking_return")
+                    _change_step(result, "collect_booking")
                     return result
                 if return_dt < date.today():
                     result = SwaigFunctionResult(
@@ -1394,7 +1212,7 @@ class VoyagerAgent(AgentBase):
                         "Ask the caller for a future return date."
                     )
                     _sync_summary(result, state)
-                    _change_step(result, "booking_return")
+                    _change_step(result, "collect_booking")
                     return result
                 if return_dt <= departure_dt:
                     result = SwaigFunctionResult(
@@ -1402,7 +1220,7 @@ class VoyagerAgent(AgentBase):
                         "Ask the caller for the correct return date."
                     )
                     _sync_summary(result, state)
-                    _change_step(result, "booking_return")
+                    _change_step(result, "collect_booking")
                     return result
                 state["return_date"] = return_str
 
@@ -1536,6 +1354,32 @@ class VoyagerAgent(AgentBase):
         def search_flights(args, raw_data):
             call_id = _call_id(raw_data)
             state = load_call_state(call_id)
+
+            # If booking data not in state, check booking_answers from gather_info
+            global_data = (raw_data or {}).get("global_data", {})
+            booking_answers = global_data.get("booking_answers", {})
+
+            if booking_answers and not state.get("departure_date"):
+                # Transfer booking_answers to state
+                departure_date = booking_answers.get("departure_date", "")
+                return_date = booking_answers.get("return_date", "")
+                adults = booking_answers.get("adults", 1)
+                cabin_class = booking_answers.get("cabin_class", "ECONOMY")
+
+                # Handle one-way trips (return_date might be "ONEWAY")
+                if return_date and return_date.upper() == "ONEWAY":
+                    return_date = None
+
+                state["departure_date"] = departure_date
+                if return_date:
+                    state["return_date"] = return_date
+                try:
+                    state["adults"] = int(adults)
+                except (ValueError, TypeError):
+                    state["adults"] = 1
+                state["cabin_class"] = cabin_class
+                save_call_state(call_id, state)
+
             return _do_search(call_id, state)
 
         # 5. SELECT FLIGHT
@@ -1632,7 +1476,7 @@ class VoyagerAgent(AgentBase):
                     "Let the caller know we'll collect new travel dates. "
                     "The trip type is already set — go straight to dates."
                 )
-                _change_step(result, "booking_departure")
+                _change_step(result, "collect_booking")
             return result
 
         # 5c. RESTART BOOKING (caller wants different dates from error_recovery)
@@ -1653,7 +1497,7 @@ class VoyagerAgent(AgentBase):
                 "Let the caller know we'll collect new travel dates. "
                 "The trip type is already set — go straight to dates."
             )
-            _change_step(result, "booking_departure")
+            _change_step(result, "collect_booking")
             return result
 
         # 6. GET FLIGHT PRICE

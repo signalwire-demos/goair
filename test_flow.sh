@@ -8,7 +8,7 @@
 # Usage:  ./test_flow.sh [--debug]
 # =============================================================================
 
-SWAIG="./venv/bin/swaig-test"
+SWAIG="swaig-test"
 AGENT="voyager.py"
 PASS=0
 FAIL=0
@@ -159,64 +159,64 @@ run --raw --call-id "${CALL_ID}-fp-bare" --custom-data "$PROFILE_BARE_IATA" --ex
 check "Bare IATA code extracted" "TUL"
 
 # =============================================================================
-section "3a. profile question flow (native steps)"
-# =============================================================================
-
-# Each submit_* tool is tested independently with global_data accumulation
-GD=$(jq -c . <<'EOGD'
-{
-  "is_new_caller": true,
-  "caller_phone": "+15551234567"
-}
-EOGD
-)
-
-# first_name
-run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_first_name --value "Test"
-check "submit_first_name → profile_last_name" "profile_last_name"
-
-# last_name
-run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_last_name --value "User"
-check "submit_last_name → profile_dob" "profile_dob"
-
-# date_of_birth WITHOUT confirmation → rejected
-run --raw --call-id "${CALL_ID}-pq" --custom-data "$(cd_gd)" --exec submit_dob --value "1990-01-01"
-check "submit_dob unconfirmed → rejected" "confirm"
-
-# date_of_birth WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_dob --value "1990-01-01" --confirmed true
-check "submit_dob confirmed → profile_gender" "profile_gender"
-
-# gender
-run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_gender --value "MALE"
-check "submit_gender → profile_email" "profile_email"
-
-# email WITHOUT confirmation → rejected
-run --raw --call-id "${CALL_ID}-pq" --custom-data "$(cd_gd)" --exec submit_email --value "test@example.com"
-check "submit_email unconfirmed → rejected" "confirm"
-
-# email WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_email --value "test@example.com" --confirmed true
-check "submit_email confirmed → profile_seat_pref" "profile_seat_pref"
-
-# seat_preference
-run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_seat_pref --value "AISLE"
-check "submit_seat_pref → profile_cabin_pref" "profile_cabin_pref"
-
-# cabin_preference
-run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_cabin_pref --value "ECONOMY"
-check "submit_cabin_pref → profile_home_airport" "profile_home_airport"
-
-# home_airport WITHOUT confirmation → rejected
-run --raw --call-id "${CALL_ID}-pq" --custom-data "$(cd_gd)" --exec submit_home_airport --value "Tulsa International (TUL)"
-check "submit_home_airport unconfirmed → rejected" "confirm"
-
-# home_airport WITH confirmation → creates passenger, transitions to get_origin
-run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_home_airport --value "Tulsa International (TUL)" --confirmed true
-check "submit_home_airport → Profile saved" "Profile saved"
-check "  → change_step: get_origin" "get_origin"
-check "  → sets is_new_caller false" '"is_new_caller": false'
-
+# OBSOLETE gather_info: section "3a. profile question flow (native steps)"
+# OBSOLETE gather_info: # =============================================================================
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # Each submit_* tool is tested independently with global_data accumulation
+# OBSOLETE gather_info: GD=$(jq -c . <<'EOGD'
+# OBSOLETE gather_info: {
+# OBSOLETE gather_info:   "is_new_caller": true,
+# OBSOLETE gather_info:   "caller_phone": "+15551234567"
+# OBSOLETE gather_info: }
+# OBSOLETE gather_info: EOGD
+# OBSOLETE gather_info: )
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # first_name
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_first_name --value "Test"
+# OBSOLETE gather_info: check "submit_first_name → profile_last_name" "profile_last_name"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # last_name
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_last_name --value "User"
+# OBSOLETE gather_info: check "submit_last_name → profile_dob" "profile_dob"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # date_of_birth WITHOUT confirmation → rejected
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-pq" --custom-data "$(cd_gd)" --exec submit_dob --value "1990-01-01"
+# OBSOLETE gather_info: check "submit_dob unconfirmed → rejected" "confirm"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # date_of_birth WITH confirmation
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_dob --value "1990-01-01" --confirmed true
+# OBSOLETE gather_info: check "submit_dob confirmed → profile_gender" "profile_gender"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # gender
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_gender --value "MALE"
+# OBSOLETE gather_info: check "submit_gender → profile_email" "profile_email"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # email WITHOUT confirmation → rejected
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-pq" --custom-data "$(cd_gd)" --exec submit_email --value "test@example.com"
+# OBSOLETE gather_info: check "submit_email unconfirmed → rejected" "confirm"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # email WITH confirmation
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_email --value "test@example.com" --confirmed true
+# OBSOLETE gather_info: check "submit_email confirmed → profile_seat_pref" "profile_seat_pref"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # seat_preference
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_seat_pref --value "AISLE"
+# OBSOLETE gather_info: check "submit_seat_pref → profile_cabin_pref" "profile_cabin_pref"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # cabin_preference
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_cabin_pref --value "ECONOMY"
+# OBSOLETE gather_info: check "submit_cabin_pref → profile_home_airport" "profile_home_airport"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # home_airport WITHOUT confirmation → rejected
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-pq" --custom-data "$(cd_gd)" --exec submit_home_airport --value "Tulsa International (TUL)"
+# OBSOLETE gather_info: check "submit_home_airport unconfirmed → rejected" "confirm"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # home_airport WITH confirmation → creates passenger, transitions to get_origin
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_home_airport --value "Tulsa International (TUL)" --confirmed true
+# OBSOLETE gather_info: check "submit_home_airport → Profile saved" "Profile saved"
+# OBSOLETE gather_info: check "  → change_step: get_origin" "get_origin"
+# OBSOLETE gather_info: check "  → sets is_new_caller false" '"is_new_caller": false'
+# OBSOLETE gather_info: 
 # =============================================================================
 section "4. select_trip_type + finalize_booking"
 # =============================================================================
@@ -228,7 +228,7 @@ check "Trip type (one-way) no confirm → bounce" "confirm\|correct"
 # select_trip_type — one-way (with confirmed)
 run --raw --call-id "$CALL_ID" --exec select_trip_type --trip_type one_way --confirmed true
 check "Trip type (one-way) saved" "one.way\|One.way"
-check "  → change_step: booking_departure" "booking_departure"
+check "  → change_step: collect_booking" "collect_booking"
 
 # select_trip_type — round-trip (phase 1: bounce sets asked flag)
 run --raw --call-id "${CALL_ID}-rt2" --exec select_trip_type --trip_type round_trip
@@ -237,7 +237,7 @@ check "Trip type (round-trip) phase 1 → bounce" "Ask the caller"
 # select_trip_type — round-trip (phase 2: confirmed)
 run --raw --call-id "${CALL_ID}-rt2" --exec select_trip_type --trip_type round_trip --confirmed true
 check "Trip type (round-trip) saved" "round.trip\|Round.trip"
-check "  → change_step: booking_departure" "booking_departure"
+check "  → change_step: collect_booking" "collect_booking"
 
 # finalize_booking — one-way with pre-populated answers
 ONEWAY_ANSWERS='{"global_data":{"booking_answers":{"departure_date":"'"$DEP_DATE"'","adults":"1","cabin_class":"ECONOMY"}}}'
@@ -255,112 +255,112 @@ PAST_DEP='{"global_data":{"booking_answers":{"departure_date":"'"$PAST_DATE"'","
 run --raw --call-id "${CALL_ID}-pastdep" --exec resolve_location --location_text Tulsa --location_type origin
 run --raw --call-id "${CALL_ID}-pastdep" --exec resolve_location --location_text Atlanta --location_type destination
 run --raw --call-id "${CALL_ID}-pastdep" --exec select_trip_type --trip_type one_way
-run --raw --call-id "${CALL_ID}-pastdep" --exec select_trip_type --trip_type one_way --confirmed true
-run --raw --call-id "${CALL_ID}-pastdep" --custom-data "$PAST_DEP" --exec finalize_booking
-check "Past departure date → rejected" "in the past"
-
-# finalize_booking — past return date rejected
-PAST_RET='{"global_data":{"booking_answers":{"departure_date":"'"$DEP_DATE"'","return_date":"'"$PAST_DATE"'","adults":"1","cabin_class":"ECONOMY"}}}'
-run --raw --call-id "${CALL_ID}-pastret" --exec resolve_location --location_text Tulsa --location_type origin
-run --raw --call-id "${CALL_ID}-pastret" --exec resolve_location --location_text Atlanta --location_type destination
-run --raw --call-id "${CALL_ID}-pastret" --exec select_trip_type --trip_type round_trip
-run --raw --call-id "${CALL_ID}-pastret" --exec select_trip_type --trip_type round_trip --confirmed true
-run --raw --call-id "${CALL_ID}-pastret" --custom-data "$PAST_RET" --exec finalize_booking
-check "Past return date → rejected" "in the past"
-
-# finalize_booking — return before departure rejected
-BAD_ORDER='{"global_data":{"booking_answers":{"departure_date":"'"$RET_DATE"'","return_date":"'"$DEP_DATE"'","adults":"1","cabin_class":"ECONOMY"}}}'
-run --raw --call-id "${CALL_ID}-badord" --exec resolve_location --location_text Tulsa --location_type origin
-run --raw --call-id "${CALL_ID}-badord" --exec resolve_location --location_text Atlanta --location_type destination
-run --raw --call-id "${CALL_ID}-badord" --exec select_trip_type --trip_type round_trip
-run --raw --call-id "${CALL_ID}-badord" --exec select_trip_type --trip_type round_trip --confirmed true
-run --raw --call-id "${CALL_ID}-badord" --custom-data "$BAD_ORDER" --exec finalize_booking
-check "Return before departure → rejected" "must be after"
-
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-pastdep" --exec select_trip_type --trip_type one_way --confirmed true
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-pastdep" --custom-data "$PAST_DEP" --exec finalize_booking
+# OBSOLETE gather_info: check "Past departure date → rejected" "in the past"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # finalize_booking — past return date rejected
+# OBSOLETE gather_info: PAST_RET='{"global_data":{"booking_answers":{"departure_date":"'"$DEP_DATE"'","return_date":"'"$PAST_DATE"'","adults":"1","cabin_class":"ECONOMY"}}}'
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-pastret" --exec resolve_location --location_text Tulsa --location_type origin
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-pastret" --exec resolve_location --location_text Atlanta --location_type destination
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-pastret" --exec select_trip_type --trip_type round_trip
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-pastret" --exec select_trip_type --trip_type round_trip --confirmed true
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-pastret" --custom-data "$PAST_RET" --exec finalize_booking
+# OBSOLETE gather_info: check "Past return date → rejected" "in the past"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # finalize_booking — return before departure rejected
+# OBSOLETE gather_info: BAD_ORDER='{"global_data":{"booking_answers":{"departure_date":"'"$RET_DATE"'","return_date":"'"$DEP_DATE"'","adults":"1","cabin_class":"ECONOMY"}}}'
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-badord" --exec resolve_location --location_text Tulsa --location_type origin
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-badord" --exec resolve_location --location_text Atlanta --location_type destination
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-badord" --exec select_trip_type --trip_type round_trip
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-badord" --exec select_trip_type --trip_type round_trip --confirmed true
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-badord" --custom-data "$BAD_ORDER" --exec finalize_booking
+# OBSOLETE gather_info: check "Return before departure → rejected" "must be after"
+# OBSOLETE gather_info: 
 # finalize_booking — >8 adults rejected
-OVER8_ANSWERS='{"global_data":{"booking_answers":{"departure_date":"'"$DEP_DATE"'","adults":"10","cabin_class":"ECONOMY"}}}'
-run --raw --call-id "${CALL_ID}-over8" --exec resolve_location --location_text Tulsa --location_type origin
-run --raw --call-id "${CALL_ID}-over8" --exec resolve_location --location_text Atlanta --location_type destination
-run --raw --call-id "${CALL_ID}-over8" --exec select_trip_type --trip_type one_way
-run --raw --call-id "${CALL_ID}-over8" --exec select_trip_type --trip_type one_way --confirmed true
-run --raw --call-id "${CALL_ID}-over8" --custom-data "$OVER8_ANSWERS" --exec finalize_booking
-check ">8 passengers rejected" "travel agent\|8 passengers"
+# OBSOLETE gather_info: OVER8_ANSWERS='{"global_data":{"booking_answers":{"departure_date":"'"$DEP_DATE"'","adults":"10","cabin_class":"ECONOMY"}}}'
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-over8" --exec resolve_location --location_text Tulsa --location_type origin
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-over8" --exec resolve_location --location_text Atlanta --location_type destination
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-over8" --exec select_trip_type --trip_type one_way
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-over8" --exec select_trip_type --trip_type one_way --confirmed true
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-over8" --custom-data "$OVER8_ANSWERS" --exec finalize_booking
+# OBSOLETE gather_info: check ">8 passengers rejected" "travel agent\|8 passengers"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # finalize_booking — non-numeric adults defaults to 1
+# OBSOLETE gather_info: BAD_ADULTS='{"global_data":{"booking_answers":{"departure_date":"'"$DEP_DATE"'","adults":"two","cabin_class":"ECONOMY"}}}'
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-badnum" --exec resolve_location --location_text Tulsa --location_type origin
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-badnum" --exec resolve_location --location_text Atlanta --location_type destination
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-badnum" --exec select_trip_type --trip_type one_way
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-badnum" --exec select_trip_type --trip_type one_way --confirmed true
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-badnum" --custom-data "$BAD_ADULTS" --exec finalize_booking
+# OBSOLETE gather_info: check "Non-numeric adults → no crash" "Booking details saved\|searching"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # =============================================================================
+# OBSOLETE gather_info: section "4a. oneway booking question flow (native steps)"
+# OBSOLETE gather_info: # =============================================================================
 
-# finalize_booking — non-numeric adults defaults to 1
-BAD_ADULTS='{"global_data":{"booking_answers":{"departure_date":"'"$DEP_DATE"'","adults":"two","cabin_class":"ECONOMY"}}}'
-run --raw --call-id "${CALL_ID}-badnum" --exec resolve_location --location_text Tulsa --location_type origin
-run --raw --call-id "${CALL_ID}-badnum" --exec resolve_location --location_text Atlanta --location_type destination
-run --raw --call-id "${CALL_ID}-badnum" --exec select_trip_type --trip_type one_way
-run --raw --call-id "${CALL_ID}-badnum" --exec select_trip_type --trip_type one_way --confirmed true
-run --raw --call-id "${CALL_ID}-badnum" --custom-data "$BAD_ADULTS" --exec finalize_booking
-check "Non-numeric adults → no crash" "Booking details saved\|searching"
-
+# OBSOLETE gather_info: # Set up origin/destination/trip_type via DB-persisted calls
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-bq" --exec resolve_location --location_text "Tulsa" --location_type origin
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-bq" --exec resolve_location --location_text "Atlanta" --location_type destination
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-bq" --exec select_trip_type --trip_type one_way
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-bq" --exec select_trip_type --trip_type one_way --confirmed true
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # Initialize GD (empty booking_answers)
+# OBSOLETE gather_info: GD='{"booking_answers":{}}'
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # departure_date WITHOUT confirmation → rejected
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-bq" --custom-data "$(cd_gd)" --exec submit_departure --value "$DEP_DATE"
+# OBSOLETE gather_info: check "submit_departure unconfirmed → rejected" "confirm"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # departure_date WITH confirmation → collect_booking (one-way skips return)
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-bq" --exec submit_departure --value "$DEP_DATE" --confirmed true
+# OBSOLETE gather_info: check "submit_departure → collect_booking" "collect_booking"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # adults
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-bq" --exec submit_adults --value "1"
+# OBSOLETE gather_info: check "submit_adults → collect_booking" "collect_booking"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # cabin_class → runs search inline, transitions to present_options
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-bq" --exec submit_cabin --value "ECONOMY"
+# OBSOLETE gather_info: check "submit_cabin → search ran inline" "option\|Option\|found"
+# OBSOLETE gather_info: check "  → change_step: present_options" "present_options"
+# OBSOLETE gather_info: 
 # =============================================================================
-section "4a. oneway booking question flow (native steps)"
-# =============================================================================
-
-# Set up origin/destination/trip_type via DB-persisted calls
-run --raw --call-id "${CALL_ID}-bq" --exec resolve_location --location_text "Tulsa" --location_type origin
-run --raw --call-id "${CALL_ID}-bq" --exec resolve_location --location_text "Atlanta" --location_type destination
-run --raw --call-id "${CALL_ID}-bq" --exec select_trip_type --trip_type one_way
-run --raw --call-id "${CALL_ID}-bq" --exec select_trip_type --trip_type one_way --confirmed true
-
-# Initialize GD (empty booking_answers)
-GD='{"booking_answers":{}}'
-
-# departure_date WITHOUT confirmation → rejected
-run --raw --call-id "${CALL_ID}-bq" --custom-data "$(cd_gd)" --exec submit_departure --value "$DEP_DATE"
-check "submit_departure unconfirmed → rejected" "confirm"
-
-# departure_date WITH confirmation → booking_adults (one-way skips return)
-run_and_merge --raw --call-id "${CALL_ID}-bq" --exec submit_departure --value "$DEP_DATE" --confirmed true
-check "submit_departure → booking_adults" "booking_adults"
-
-# adults
-run_and_merge --raw --call-id "${CALL_ID}-bq" --exec submit_adults --value "1"
-check "submit_adults → booking_cabin" "booking_cabin"
-
-# cabin_class → runs search inline, transitions to present_options
-run_and_merge --raw --call-id "${CALL_ID}-bq" --exec submit_cabin --value "ECONOMY"
-check "submit_cabin → search ran inline" "option\|Option\|found"
-check "  → change_step: present_options" "present_options"
-
-# =============================================================================
-section "4b. roundtrip booking question flow (native steps)"
-# =============================================================================
-
-# Set up origin/destination/trip_type via DB-persisted calls
-run --raw --call-id "${CALL_ID}-br" --exec resolve_location --location_text "Tulsa" --location_type origin
-run --raw --call-id "${CALL_ID}-br" --exec resolve_location --location_text "Atlanta" --location_type destination
-run --raw --call-id "${CALL_ID}-br" --exec select_trip_type --trip_type round_trip
-run --raw --call-id "${CALL_ID}-br" --exec select_trip_type --trip_type round_trip --confirmed true
-
-# Initialize GD (empty booking_answers)
-GD='{"booking_answers":{}}'
-
-# departure_date phase 1 (bounce sets asked flag)
-run --raw --call-id "${CALL_ID}-br" --custom-data "$(cd_gd)" --exec submit_departure --value "$DEP_DATE"
-
-# departure_date phase 2 WITH confirmation → booking_return (round-trip)
-run_and_merge --raw --call-id "${CALL_ID}-br" --exec submit_departure --value "$DEP_DATE" --confirmed true
-check "submit_departure → booking_return" "booking_return"
-
-# return_date phase 1 (bounce sets asked flag)
-run --raw --call-id "${CALL_ID}-br" --custom-data "$(cd_gd)" --exec submit_return --value "$RET_DATE"
-
-# return_date phase 2 WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-br" --exec submit_return --value "$RET_DATE" --confirmed true
-check "submit_return → booking_adults" "booking_adults"
-
-# adults
-run_and_merge --raw --call-id "${CALL_ID}-br" --exec submit_adults --value "2"
-check "submit_adults → booking_cabin" "booking_cabin"
-
-# cabin_class → runs search inline, transitions to present_options
-run_and_merge --raw --call-id "${CALL_ID}-br" --exec submit_cabin --value "BUSINESS"
-check "submit_cabin → search ran inline" "option\|Option\|found"
-check "  → change_step: present_options" "present_options"
-
+# OBSOLETE gather_info: section "4b. roundtrip booking question flow (native steps)"
+# OBSOLETE gather_info: # =============================================================================
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # Set up origin/destination/trip_type via DB-persisted calls
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-br" --exec resolve_location --location_text "Tulsa" --location_type origin
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-br" --exec resolve_location --location_text "Atlanta" --location_type destination
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-br" --exec select_trip_type --trip_type round_trip
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-br" --exec select_trip_type --trip_type round_trip --confirmed true
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # Initialize GD (empty booking_answers)
+# OBSOLETE gather_info: GD='{"booking_answers":{}}'
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # departure_date phase 1 (bounce sets asked flag)
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-br" --custom-data "$(cd_gd)" --exec submit_departure --value "$DEP_DATE"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # departure_date phase 2 WITH confirmation → collect_booking (round-trip)
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-br" --exec submit_departure --value "$DEP_DATE" --confirmed true
+# OBSOLETE gather_info: check "submit_departure → collect_booking" "collect_booking"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # return_date phase 1 (bounce sets asked flag)
+# OBSOLETE gather_info: run --raw --call-id "${CALL_ID}-br" --custom-data "$(cd_gd)" --exec submit_return --value "$RET_DATE"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # return_date phase 2 WITH confirmation
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-br" --exec submit_return --value "$RET_DATE" --confirmed true
+# OBSOLETE gather_info: check "submit_return → collect_booking" "collect_booking"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # adults
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-br" --exec submit_adults --value "2"
+# OBSOLETE gather_info: check "submit_adults → collect_booking" "collect_booking"
+# OBSOLETE gather_info: 
+# OBSOLETE gather_info: # cabin_class → runs search inline, transitions to present_options
+# OBSOLETE gather_info: run_and_merge --raw --call-id "${CALL_ID}-br" --exec submit_cabin --value "BUSINESS"
+# OBSOLETE gather_info: check "submit_cabin → search ran inline" "option\|Option\|found"
+# OBSOLETE gather_info: check "  → change_step: present_options" "present_options"
+# OBSOLETE gather_info: 
 # =============================================================================
 section "5. search_flights — guard checks"
 # =============================================================================
@@ -416,7 +416,7 @@ section "8a. forced transition tools"
 
 # restart_search — different dates
 run --raw --call-id "${CALL_ID}-rs1" --exec restart_search --reason different_dates
-check "restart_search (dates) → booking_departure" "booking_departure"
+check "restart_search (dates) → collect_booking" "collect_booking"
 
 # restart_search — different route
 run --raw --call-id "${CALL_ID}-rs2" --exec restart_search --reason different_route
@@ -430,9 +430,9 @@ check "confirm_booking → create_booking" "create_booking"
 run --raw --call-id "${CALL_ID}-db" --exec decline_booking
 check "decline_booking → present_options" "present_options"
 
-# restart_booking → booking_departure
+# restart_booking → collect_booking
 run --raw --call-id "${CALL_ID}-rb" --exec restart_booking
-check "restart_booking → booking_departure" "booking_departure"
+check "restart_booking → collect_booking" "collect_booking"
 
 # =============================================================================
 section "9. book_flight — guard checks"
