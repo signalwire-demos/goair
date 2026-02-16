@@ -139,8 +139,8 @@ check "  → response mentions get_destination" "get_destination"
 section "3. finalize_profile"
 # =============================================================================
 
-# Pre-built global_data with completed profile answers
-PROFILE_ANSWERS='{"global_data":{"is_new_caller":true,"caller_phone":"+15551234567","skill:profile":{"answers":[{"key_name":"first_name","answer":"Test"},{"key_name":"last_name","answer":"User"},{"key_name":"date_of_birth","answer":"1990-01-01"},{"key_name":"gender","answer":"MALE"},{"key_name":"email","answer":"test@example.com"},{"key_name":"seat_preference","answer":"AISLE"},{"key_name":"cabin_preference","answer":"ECONOMY"},{"key_name":"home_airport_name","answer":"Tulsa International (TUL)"}]}}}'
+# Pre-built global_data with completed profile answers (flat dict format)
+PROFILE_ANSWERS='{"global_data":{"is_new_caller":true,"caller_phone":"+15551234567","profile_answers":{"first_name":"Test","last_name":"User","date_of_birth":"1990-01-01","gender":"MALE","email":"test@example.com","seat_preference":"AISLE","cabin_preference":"ECONOMY","home_airport_name":"Tulsa International (TUL)"}}}'
 
 run --raw --call-id "${CALL_ID}-fp" --custom-data "$PROFILE_ANSWERS" --exec finalize_profile
 check "Profile saved" "Profile saved"
@@ -149,245 +149,217 @@ check "  → sets is_new_caller false" '"is_new_caller": false'
 check "  → change_step: get_origin" "get_origin"
 
 # Missing name → error
-PROFILE_NO_NAME='{"global_data":{"is_new_caller":true,"caller_phone":"+15551234567","skill:profile":{"answers":[{"key_name":"first_name","answer":""},{"key_name":"last_name","answer":""}]}}}'
+PROFILE_NO_NAME='{"global_data":{"is_new_caller":true,"caller_phone":"+15551234567","profile_answers":{"first_name":"","last_name":""}}}'
 run --raw --call-id "${CALL_ID}-fp-noname" --custom-data "$PROFILE_NO_NAME" --exec finalize_profile
 check "Missing name → error" "Missing name"
 
 # IATA extraction from bare code (no parentheses)
-PROFILE_BARE_IATA='{"global_data":{"is_new_caller":true,"caller_phone":"+15551234567","skill:profile":{"answers":[{"key_name":"first_name","answer":"Test"},{"key_name":"last_name","answer":"User"},{"key_name":"home_airport_name","answer":"TUL"}]}}}'
+PROFILE_BARE_IATA='{"global_data":{"is_new_caller":true,"caller_phone":"+15551234567","profile_answers":{"first_name":"Test","last_name":"User","home_airport_name":"TUL"}}}'
 run --raw --call-id "${CALL_ID}-fp-bare" --custom-data "$PROFILE_BARE_IATA" --exec finalize_profile
 check "Bare IATA code extracted" "TUL"
 
 # =============================================================================
-section "3a. profile info_gatherer flow"
+section "3a. profile question flow (native steps)"
 # =============================================================================
 
-# Initialize GD with profile questions initial state
+# Each submit_* tool is tested independently with global_data accumulation
 GD=$(jq -c . <<'EOGD'
 {
   "is_new_caller": true,
-  "caller_phone": "+15551234567",
-  "skill:profile": {
-    "questions": [
-      {"key_name": "first_name", "question_text": "What is your first name?"},
-      {"key_name": "last_name", "question_text": "What is your last name?"},
-      {"key_name": "date_of_birth", "question_text": "What is your date of birth including month day and year?", "confirm": true, "prompt_add": "Accept natural language but submit in YYYY-MM-DD format. Must have complete date."},
-      {"key_name": "gender", "question_text": "Are you male or female?", "prompt_add": "Submit exactly MALE or FEMALE."},
-      {"key_name": "email", "question_text": "What email should we send confirmations to?", "confirm": true},
-      {"key_name": "seat_preference", "question_text": "Do you prefer a window or aisle seat?", "prompt_add": "Submit exactly WINDOW or AISLE."},
-      {"key_name": "cabin_preference", "question_text": "What cabin class do you usually fly?", "prompt_add": "Submit exactly ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST."},
-      {"key_name": "home_airport_name", "question_text": "What airport do you usually fly from?", "confirm": true, "prompt_add": "After the caller answers, call resolve_location with their answer to resolve it to an IATA code. Submit the answer as 'Airport Name (IATA)' format, e.g. 'San Francisco International (SFO)'. If multiple airports are returned, ask which one they mean before submitting."}
-    ],
-    "question_index": 0,
-    "answers": []
-  }
+  "caller_phone": "+15551234567"
 }
 EOGD
 )
 
-# start_questions → first question
-run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_start_questions
-check "start_questions → asks first name" "first name"
-
 # first_name
-run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --answer "Test"
-check "first_name → advances to last name" "last name"
+run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_first_name --value "Test"
+check "submit_first_name → profile_last_name" "profile_last_name"
 
 # last_name
-run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --answer "User"
-check "last_name → advances to date of birth" "date of birth"
+run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_last_name --value "User"
+check "submit_last_name → profile_dob" "profile_dob"
 
 # date_of_birth WITHOUT confirmation → rejected
-run --raw --call-id "${CALL_ID}-igp" --custom-data "$(cd_gd)" --exec profile_submit_answer --answer "1990-01-01"
-check "date_of_birth unconfirmed → rejected" "confirm"
+run --raw --call-id "${CALL_ID}-pq" --custom-data "$(cd_gd)" --exec submit_dob --value "1990-01-01"
+check "submit_dob unconfirmed → rejected" "confirm"
 
 # date_of_birth WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --answer "1990-01-01" --confirmed_by_user true
-check "date_of_birth confirmed → advances" "male\|female\|gender"
+run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_dob --value "1990-01-01" --confirmed true
+check "submit_dob confirmed → profile_gender" "profile_gender"
 
 # gender
-run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --answer "MALE"
-check "gender → advances to email" "email"
+run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_gender --value "MALE"
+check "submit_gender → profile_email" "profile_email"
+
+# email WITHOUT confirmation → rejected
+run --raw --call-id "${CALL_ID}-pq" --custom-data "$(cd_gd)" --exec submit_email --value "test@example.com"
+check "submit_email unconfirmed → rejected" "confirm"
 
 # email WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --answer "test@example.com" --confirmed_by_user true
-check "email confirmed → advances to seat" "seat\|window\|aisle"
+run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_email --value "test@example.com" --confirmed true
+check "submit_email confirmed → profile_seat_pref" "profile_seat_pref"
 
 # seat_preference
-run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --answer "AISLE"
-check "seat_preference → advances to cabin" "cabin"
+run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_seat_pref --value "AISLE"
+check "submit_seat_pref → profile_cabin_pref" "profile_cabin_pref"
 
 # cabin_preference
-run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --answer "ECONOMY"
-check "cabin_preference → advances to airport" "airport\|fly from"
+run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_cabin_pref --value "ECONOMY"
+check "submit_cabin_pref → profile_home_airport" "profile_home_airport"
 
-# home_airport_name WITH confirmation → last question → completion
-run_and_merge --raw --call-id "${CALL_ID}-igp" --exec profile_submit_answer --answer "Tulsa International (TUL)" --confirmed_by_user true
-check "home_airport → completion message" "finalize_profile"
+# home_airport WITHOUT confirmation → rejected
+run --raw --call-id "${CALL_ID}-pq" --custom-data "$(cd_gd)" --exec submit_home_airport --value "Tulsa International (TUL)"
+check "submit_home_airport unconfirmed → rejected" "confirm"
 
-# finalize with accumulated answers
-run --raw --call-id "${CALL_ID}-igp" --custom-data "$(cd_gd)" --exec finalize_profile
-check "finalize_profile → Profile saved" "Profile saved"
+# home_airport WITH confirmation → creates passenger, transitions to get_origin
+run_and_merge --raw --call-id "${CALL_ID}-pq" --exec submit_home_airport --value "Tulsa International (TUL)" --confirmed true
+check "submit_home_airport → Profile saved" "Profile saved"
+check "  → change_step: get_origin" "get_origin"
+check "  → sets is_new_caller false" '"is_new_caller": false'
 
 # =============================================================================
 section "4. select_trip_type + finalize_booking"
 # =============================================================================
 
-# select_trip_type — one-way
+# select_trip_type — one-way (without confirmed → asks to confirm)
 run --raw --call-id "$CALL_ID" --exec select_trip_type --trip_type one_way
-check "Trip type (one-way) saved" "one.way\|One.way"
-check "  → change_step: collect_booking_oneway" "collect_booking_oneway"
+check "Trip type (one-way) no confirm → bounce" "confirm\|correct"
 
-# select_trip_type — round-trip
+# select_trip_type — one-way (with confirmed)
+run --raw --call-id "$CALL_ID" --exec select_trip_type --trip_type one_way --confirmed true
+check "Trip type (one-way) saved" "one.way\|One.way"
+check "  → change_step: booking_departure" "booking_departure"
+
+# select_trip_type — round-trip (phase 1: bounce sets asked flag)
 run --raw --call-id "${CALL_ID}-rt2" --exec select_trip_type --trip_type round_trip
+check "Trip type (round-trip) phase 1 → bounce" "Ask the caller"
+
+# select_trip_type — round-trip (phase 2: confirmed)
+run --raw --call-id "${CALL_ID}-rt2" --exec select_trip_type --trip_type round_trip --confirmed true
 check "Trip type (round-trip) saved" "round.trip\|Round.trip"
-check "  → change_step: collect_booking_roundtrip" "collect_booking_roundtrip"
+check "  → change_step: booking_departure" "booking_departure"
 
 # finalize_booking — one-way with pre-populated answers
-ONEWAY_ANSWERS='{"global_data":{"skill:oneway":{"answers":[{"key_name":"departure_date","answer":"'"$DEP_DATE"'"},{"key_name":"adults","answer":"1"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
+ONEWAY_ANSWERS='{"global_data":{"booking_answers":{"departure_date":"'"$DEP_DATE"'","adults":"1","cabin_class":"ECONOMY"}}}'
 run --raw --call-id "$CALL_ID" --custom-data "$ONEWAY_ANSWERS" --exec finalize_booking
 check "Booking details saved" "Booking details saved\|searching"
 check "  → change_step: search_flights" "search_flights"
 
 # finalize_booking — round-trip
-ROUNDTRIP_ANSWERS='{"global_data":{"skill:roundtrip":{"answers":[{"key_name":"departure_date","answer":"'"$DEP_DATE"'"},{"key_name":"return_date","answer":"'"$RET_DATE"'"},{"key_name":"adults","answer":"2"},{"key_name":"cabin_class","answer":"BUSINESS"}]}}}'
+ROUNDTRIP_ANSWERS='{"global_data":{"booking_answers":{"departure_date":"'"$DEP_DATE"'","return_date":"'"$RET_DATE"'","adults":"2","cabin_class":"BUSINESS"}}}'
 run --raw --call-id "${CALL_ID}-rt2" --custom-data "$ROUNDTRIP_ANSWERS" --exec finalize_booking
 check "Round-trip booking saved" "Booking details saved\|searching"
 
 # finalize_booking — past departure date rejected
-PAST_DEP='{"global_data":{"skill:oneway":{"answers":[{"key_name":"departure_date","answer":"'"$PAST_DATE"'"},{"key_name":"adults","answer":"1"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
+PAST_DEP='{"global_data":{"booking_answers":{"departure_date":"'"$PAST_DATE"'","adults":"1","cabin_class":"ECONOMY"}}}'
 run --raw --call-id "${CALL_ID}-pastdep" --exec resolve_location --location_text Tulsa --location_type origin
 run --raw --call-id "${CALL_ID}-pastdep" --exec resolve_location --location_text Atlanta --location_type destination
 run --raw --call-id "${CALL_ID}-pastdep" --exec select_trip_type --trip_type one_way
+run --raw --call-id "${CALL_ID}-pastdep" --exec select_trip_type --trip_type one_way --confirmed true
 run --raw --call-id "${CALL_ID}-pastdep" --custom-data "$PAST_DEP" --exec finalize_booking
 check "Past departure date → rejected" "in the past"
 
 # finalize_booking — past return date rejected
-PAST_RET='{"global_data":{"skill:roundtrip":{"answers":[{"key_name":"departure_date","answer":"'"$DEP_DATE"'"},{"key_name":"return_date","answer":"'"$PAST_DATE"'"},{"key_name":"adults","answer":"1"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
+PAST_RET='{"global_data":{"booking_answers":{"departure_date":"'"$DEP_DATE"'","return_date":"'"$PAST_DATE"'","adults":"1","cabin_class":"ECONOMY"}}}'
 run --raw --call-id "${CALL_ID}-pastret" --exec resolve_location --location_text Tulsa --location_type origin
 run --raw --call-id "${CALL_ID}-pastret" --exec resolve_location --location_text Atlanta --location_type destination
 run --raw --call-id "${CALL_ID}-pastret" --exec select_trip_type --trip_type round_trip
+run --raw --call-id "${CALL_ID}-pastret" --exec select_trip_type --trip_type round_trip --confirmed true
 run --raw --call-id "${CALL_ID}-pastret" --custom-data "$PAST_RET" --exec finalize_booking
 check "Past return date → rejected" "in the past"
 
 # finalize_booking — return before departure rejected
-BAD_ORDER='{"global_data":{"skill:roundtrip":{"answers":[{"key_name":"departure_date","answer":"'"$RET_DATE"'"},{"key_name":"return_date","answer":"'"$DEP_DATE"'"},{"key_name":"adults","answer":"1"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
+BAD_ORDER='{"global_data":{"booking_answers":{"departure_date":"'"$RET_DATE"'","return_date":"'"$DEP_DATE"'","adults":"1","cabin_class":"ECONOMY"}}}'
 run --raw --call-id "${CALL_ID}-badord" --exec resolve_location --location_text Tulsa --location_type origin
 run --raw --call-id "${CALL_ID}-badord" --exec resolve_location --location_text Atlanta --location_type destination
 run --raw --call-id "${CALL_ID}-badord" --exec select_trip_type --trip_type round_trip
+run --raw --call-id "${CALL_ID}-badord" --exec select_trip_type --trip_type round_trip --confirmed true
 run --raw --call-id "${CALL_ID}-badord" --custom-data "$BAD_ORDER" --exec finalize_booking
 check "Return before departure → rejected" "must be after"
 
 # finalize_booking — >8 adults rejected
-OVER8_ANSWERS='{"global_data":{"skill:oneway":{"answers":[{"key_name":"departure_date","answer":"'"$DEP_DATE"'"},{"key_name":"adults","answer":"10"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
+OVER8_ANSWERS='{"global_data":{"booking_answers":{"departure_date":"'"$DEP_DATE"'","adults":"10","cabin_class":"ECONOMY"}}}'
 run --raw --call-id "${CALL_ID}-over8" --exec resolve_location --location_text Tulsa --location_type origin
 run --raw --call-id "${CALL_ID}-over8" --exec resolve_location --location_text Atlanta --location_type destination
 run --raw --call-id "${CALL_ID}-over8" --exec select_trip_type --trip_type one_way
+run --raw --call-id "${CALL_ID}-over8" --exec select_trip_type --trip_type one_way --confirmed true
 run --raw --call-id "${CALL_ID}-over8" --custom-data "$OVER8_ANSWERS" --exec finalize_booking
 check ">8 passengers rejected" "travel agent\|8 passengers"
 
 # finalize_booking — non-numeric adults defaults to 1
-BAD_ADULTS='{"global_data":{"skill:oneway":{"answers":[{"key_name":"departure_date","answer":"'"$DEP_DATE"'"},{"key_name":"adults","answer":"two"},{"key_name":"cabin_class","answer":"ECONOMY"}]}}}'
+BAD_ADULTS='{"global_data":{"booking_answers":{"departure_date":"'"$DEP_DATE"'","adults":"two","cabin_class":"ECONOMY"}}}'
 run --raw --call-id "${CALL_ID}-badnum" --exec resolve_location --location_text Tulsa --location_type origin
 run --raw --call-id "${CALL_ID}-badnum" --exec resolve_location --location_text Atlanta --location_type destination
 run --raw --call-id "${CALL_ID}-badnum" --exec select_trip_type --trip_type one_way
+run --raw --call-id "${CALL_ID}-badnum" --exec select_trip_type --trip_type one_way --confirmed true
 run --raw --call-id "${CALL_ID}-badnum" --custom-data "$BAD_ADULTS" --exec finalize_booking
 check "Non-numeric adults → no crash" "Booking details saved\|searching"
 
 # =============================================================================
-section "4a. oneway booking info_gatherer flow"
+section "4a. oneway booking question flow (native steps)"
 # =============================================================================
 
 # Set up origin/destination/trip_type via DB-persisted calls
-run --raw --call-id "${CALL_ID}-igb" --exec resolve_location --location_text "Tulsa" --location_type origin
-run --raw --call-id "${CALL_ID}-igb" --exec resolve_location --location_text "Atlanta" --location_type destination
-run --raw --call-id "${CALL_ID}-igb" --exec select_trip_type --trip_type one_way
+run --raw --call-id "${CALL_ID}-bq" --exec resolve_location --location_text "Tulsa" --location_type origin
+run --raw --call-id "${CALL_ID}-bq" --exec resolve_location --location_text "Atlanta" --location_type destination
+run --raw --call-id "${CALL_ID}-bq" --exec select_trip_type --trip_type one_way
+run --raw --call-id "${CALL_ID}-bq" --exec select_trip_type --trip_type one_way --confirmed true
 
-# Initialize GD with oneway questions
-GD=$(jq -c . <<'EOGD'
-{
-  "skill:oneway": {
-    "questions": [
-      {"key_name": "departure_date", "question_text": "When would you like to depart?", "confirm": true, "prompt_add": "Accept natural language but submit in YYYY-MM-DD format."},
-      {"key_name": "adults", "question_text": "How many passengers will be traveling?", "prompt_add": "Submit as a positive integer (e.g. 1, 2, 3). Maximum 8 — for larger parties, tell the caller they'll need to contact a travel agent."},
-      {"key_name": "cabin_class", "question_text": "What cabin class would you like — economy, premium economy, business, or first?", "prompt_add": "Submit exactly ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST. If the passenger has a stored cabin preference in their profile, suggest it."}
-    ],
-    "question_index": 0,
-    "answers": []
-  }
-}
-EOGD
-)
+# Initialize GD (empty booking_answers)
+GD='{"booking_answers":{}}'
 
-# start_questions → first question
-run_and_merge --raw --call-id "${CALL_ID}-igb" --exec oneway_start_questions
-check "start_questions → asks departure" "depart"
+# departure_date WITHOUT confirmation → rejected
+run --raw --call-id "${CALL_ID}-bq" --custom-data "$(cd_gd)" --exec submit_departure --value "$DEP_DATE"
+check "submit_departure unconfirmed → rejected" "confirm"
 
-# departure_date WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-igb" --exec oneway_submit_answer --answer "$DEP_DATE" --confirmed_by_user true
-check "departure_date → advances to passengers" "passenger\|how many"
+# departure_date WITH confirmation → booking_adults (one-way skips return)
+run_and_merge --raw --call-id "${CALL_ID}-bq" --exec submit_departure --value "$DEP_DATE" --confirmed true
+check "submit_departure → booking_adults" "booking_adults"
 
 # adults
-run_and_merge --raw --call-id "${CALL_ID}-igb" --exec oneway_submit_answer --answer "1"
-check "adults → advances to cabin" "cabin"
+run_and_merge --raw --call-id "${CALL_ID}-bq" --exec submit_adults --value "1"
+check "submit_adults → booking_cabin" "booking_cabin"
 
-# cabin_class → last question → completion
-run_and_merge --raw --call-id "${CALL_ID}-igb" --exec oneway_submit_answer --answer "ECONOMY"
-check "cabin_class → completion message" "finalize_booking"
-
-# finalize with accumulated answers
-run --raw --call-id "${CALL_ID}-igb" --custom-data "$(cd_gd)" --exec finalize_booking
-check "finalize_booking → Booking details saved" "Booking details saved\|searching"
+# cabin_class → runs search inline, transitions to present_options
+run_and_merge --raw --call-id "${CALL_ID}-bq" --exec submit_cabin --value "ECONOMY"
+check "submit_cabin → search ran inline" "option\|Option\|found"
+check "  → change_step: present_options" "present_options"
 
 # =============================================================================
-section "4b. roundtrip booking info_gatherer flow"
+section "4b. roundtrip booking question flow (native steps)"
 # =============================================================================
 
 # Set up origin/destination/trip_type via DB-persisted calls
-run --raw --call-id "${CALL_ID}-igr" --exec resolve_location --location_text "Tulsa" --location_type origin
-run --raw --call-id "${CALL_ID}-igr" --exec resolve_location --location_text "Atlanta" --location_type destination
-run --raw --call-id "${CALL_ID}-igr" --exec select_trip_type --trip_type round_trip
+run --raw --call-id "${CALL_ID}-br" --exec resolve_location --location_text "Tulsa" --location_type origin
+run --raw --call-id "${CALL_ID}-br" --exec resolve_location --location_text "Atlanta" --location_type destination
+run --raw --call-id "${CALL_ID}-br" --exec select_trip_type --trip_type round_trip
+run --raw --call-id "${CALL_ID}-br" --exec select_trip_type --trip_type round_trip --confirmed true
 
-# Initialize GD with roundtrip questions
-GD=$(jq -c . <<'EOGD'
-{
-  "skill:roundtrip": {
-    "questions": [
-      {"key_name": "departure_date", "question_text": "When would you like to depart?", "confirm": true, "prompt_add": "Accept natural language but submit in YYYY-MM-DD format."},
-      {"key_name": "return_date", "question_text": "And when would you like to return?", "confirm": true, "prompt_add": "Accept natural language but submit in YYYY-MM-DD format. Must be after departure date."},
-      {"key_name": "adults", "question_text": "How many passengers will be traveling?", "prompt_add": "Submit as a positive integer (e.g. 1, 2, 3). Maximum 8 — for larger parties, tell the caller they'll need to contact a travel agent."},
-      {"key_name": "cabin_class", "question_text": "What cabin class would you like — economy, premium economy, business, or first?", "prompt_add": "Submit exactly ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST. If the passenger has a stored cabin preference in their profile, suggest it."}
-    ],
-    "question_index": 0,
-    "answers": []
-  }
-}
-EOGD
-)
+# Initialize GD (empty booking_answers)
+GD='{"booking_answers":{}}'
 
-# start_questions → first question
-run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_start_questions
-check "start_questions → asks departure" "depart"
+# departure_date phase 1 (bounce sets asked flag)
+run --raw --call-id "${CALL_ID}-br" --custom-data "$(cd_gd)" --exec submit_departure --value "$DEP_DATE"
 
-# departure_date WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "$DEP_DATE" --confirmed_by_user true
-check "departure_date → advances to return" "return"
+# departure_date phase 2 WITH confirmation → booking_return (round-trip)
+run_and_merge --raw --call-id "${CALL_ID}-br" --exec submit_departure --value "$DEP_DATE" --confirmed true
+check "submit_departure → booking_return" "booking_return"
 
-# return_date WITH confirmation
-run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "$RET_DATE" --confirmed_by_user true
-check "return_date → advances to passengers" "passenger\|how many"
+# return_date phase 1 (bounce sets asked flag)
+run --raw --call-id "${CALL_ID}-br" --custom-data "$(cd_gd)" --exec submit_return --value "$RET_DATE"
+
+# return_date phase 2 WITH confirmation
+run_and_merge --raw --call-id "${CALL_ID}-br" --exec submit_return --value "$RET_DATE" --confirmed true
+check "submit_return → booking_adults" "booking_adults"
 
 # adults
-run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "2"
-check "adults → advances to cabin" "cabin"
+run_and_merge --raw --call-id "${CALL_ID}-br" --exec submit_adults --value "2"
+check "submit_adults → booking_cabin" "booking_cabin"
 
-# cabin_class → last question → completion
-run_and_merge --raw --call-id "${CALL_ID}-igr" --exec roundtrip_submit_answer --answer "BUSINESS"
-check "cabin_class → completion message" "finalize_booking"
-
-# finalize with accumulated answers
-run --raw --call-id "${CALL_ID}-igr" --custom-data "$(cd_gd)" --exec finalize_booking
-check "finalize_booking → Booking details saved" "Booking details saved\|searching"
+# cabin_class → runs search inline, transitions to present_options
+run_and_merge --raw --call-id "${CALL_ID}-br" --exec submit_cabin --value "BUSINESS"
+check "submit_cabin → search ran inline" "option\|Option\|found"
+check "  → change_step: present_options" "present_options"
 
 # =============================================================================
 section "5. search_flights — guard checks"
@@ -437,6 +409,30 @@ check "No offer → search_flights" "No flight\|search"
 run --raw --call-id "$CALL_ID" --exec get_flight_price
 check "Price confirmed" "confirmed price\|price is\|\\\$"
 check "  → asks caller to confirm" "book this\|Shall I"
+
+# =============================================================================
+section "8a. forced transition tools"
+# =============================================================================
+
+# restart_search — different dates
+run --raw --call-id "${CALL_ID}-rs1" --exec restart_search --reason different_dates
+check "restart_search (dates) → collect_trip_type" "collect_trip_type"
+
+# restart_search — different route
+run --raw --call-id "${CALL_ID}-rs2" --exec restart_search --reason different_route
+check "restart_search (route) → get_origin" "get_origin"
+
+# confirm_booking → create_booking
+run --raw --call-id "${CALL_ID}-cb" --exec confirm_booking
+check "confirm_booking → create_booking" "create_booking"
+
+# decline_booking → present_options
+run --raw --call-id "${CALL_ID}-db" --exec decline_booking
+check "decline_booking → present_options" "present_options"
+
+# restart_booking → collect_trip_type
+run --raw --call-id "${CALL_ID}-rb" --exec restart_booking
+check "restart_booking → collect_trip_type" "collect_trip_type"
 
 # =============================================================================
 section "9. book_flight — guard checks"
