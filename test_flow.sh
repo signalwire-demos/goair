@@ -416,7 +416,7 @@ section "8a. forced transition tools"
 
 # restart_search — different dates
 run --raw --call-id "${CALL_ID}-rs1" --exec restart_search --reason different_dates
-check "restart_search (dates) → collect_trip_type" "collect_trip_type"
+check "restart_search (dates) → booking_departure" "booking_departure"
 
 # restart_search — different route
 run --raw --call-id "${CALL_ID}-rs2" --exec restart_search --reason different_route
@@ -430,9 +430,9 @@ check "confirm_booking → create_booking" "create_booking"
 run --raw --call-id "${CALL_ID}-db" --exec decline_booking
 check "decline_booking → present_options" "present_options"
 
-# restart_booking → collect_trip_type
+# restart_booking → booking_departure
 run --raw --call-id "${CALL_ID}-rb" --exec restart_booking
-check "restart_booking → collect_trip_type" "collect_trip_type"
+check "restart_booking → booking_departure" "booking_departure"
 
 # =============================================================================
 section "9. book_flight — guard checks"

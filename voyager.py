@@ -382,7 +382,7 @@ class VoyagerAgent(AgentBase):
 
         # SEARCH FLIGHTS
         search_flights_step = ctx.add_step("search_flights")
-        search_flights_step.add_section("Task", "Search for flights and prepare up to 3 options for presentation")
+        search_flights_step.add_section("Task", "Re-search flights (used only for error recovery — happy path searches inline via submit_cabin)")
         search_flights_step.add_bullets("Process", [
             "Call search_flights to find available flights",
             "The function returns up to 3 options pre-summarized for voice",
@@ -405,7 +405,7 @@ class VoyagerAgent(AgentBase):
         ])
         present_options.set_step_criteria("Caller selects an option via select_flight or requests new search via restart_search")
         present_options.set_functions(["select_flight", "restart_search"])
-        present_options.set_valid_steps(["confirm_price", "collect_trip_type", "get_origin"])
+        present_options.set_valid_steps(["confirm_price", "booking_departure", "get_origin"])
 
         # CONFIRM PRICE
         confirm_price = ctx.add_step("confirm_price")
@@ -439,14 +439,14 @@ class VoyagerAgent(AgentBase):
         error_recovery = ctx.add_step("error_recovery")
         error_recovery.add_section("Task", "Handle booking failures, no results, and mid-flow changes")
         error_recovery.add_bullets("Process", [
-            "Offer to search for different options on the same route or try a different route",
-            "If different route: ask for the new destination and call resolve_location",
-            "If different dates: call restart_booking to start over with new dates",
-            "If same route: call search_flights to find new options",
+            "Offer options: try different dates, a different route, or re-search the same route",
+            "If different dates: call restart_booking to go back to date collection",
+            "If different route: call restart_search with reason='different_route' to start over from origin",
+            "If same route: call search_flights to re-search with current settings",
         ])
         error_recovery.set_step_criteria("Recovery action taken")
-        error_recovery.set_functions(["resolve_location", "search_flights", "restart_booking"])
-        error_recovery.set_valid_steps(["present_options", "collect_trip_type", "get_destination", "disambiguate_origin"])
+        error_recovery.set_functions(["search_flights", "restart_booking", "restart_search"])
+        error_recovery.set_valid_steps(["present_options", "booking_departure", "get_origin"])
 
         # WRAP UP
         wrap_up = ctx.add_step("wrap_up")
@@ -706,8 +706,11 @@ class VoyagerAgent(AgentBase):
             tool_name="submit_departure", key_name="departure_date",
             storage_ns="booking_answers", next_step=_departure_next,
             confirm=True, validator=_date_not_past,
-            extra_instructions=["Accept natural language but submit in YYYY-MM-DD format"]
-        ).set_valid_steps(["booking_return", "booking_adults"])
+            extra_instructions=["Accept natural language but submit in YYYY-MM-DD format",
+                                "After submission: round-trip goes to booking_return, one-way skips to booking_adults",
+                                "If the caller wants to change route, call restart_search"],
+            extra_functions=["restart_search"]
+        ).set_valid_steps(["booking_return", "booking_adults", "get_origin"])
 
         self._add_question_step(ctx, "booking_return",
             task="Collect the return date",
@@ -716,8 +719,10 @@ class VoyagerAgent(AgentBase):
             storage_ns="booking_answers", next_step="booking_adults",
             confirm=True, validator=_return_date_val,
             extra_instructions=["Accept natural language but submit in YYYY-MM-DD format",
-                                "Must be after the departure date"]
-        ).set_valid_steps(["booking_adults"])
+                                "Must be after the departure date",
+                                "If the caller wants to change route or start over, call restart_search"],
+            extra_functions=["restart_search"]
+        ).set_valid_steps(["booking_adults", "booking_departure", "get_origin"])
 
         self._add_question_step(ctx, "booking_adults",
             task="Collect the number of passengers",
@@ -726,8 +731,10 @@ class VoyagerAgent(AgentBase):
             storage_ns="booking_answers", next_step="booking_cabin",
             validator=_integer_1_8,
             extra_instructions=["Submit as a positive integer (1-8)",
-                                "Maximum 8 — for larger parties, tell the caller to contact a travel agent"]
-        ).set_valid_steps(["booking_cabin"])
+                                "Maximum 8 — for larger parties, tell the caller to contact a travel agent",
+                                "If the caller wants to change route or dates, call restart_search"],
+            extra_functions=["restart_search"]
+        ).set_valid_steps(["booking_cabin", "booking_departure", "get_origin"])
 
         # booking_cabin — custom handler (saves to SQLite, transitions to search)
         bc_step = ctx.add_step("booking_cabin")
@@ -736,10 +743,11 @@ class VoyagerAgent(AgentBase):
             "Ask the caller: 'What cabin class would you like — economy, premium economy, business, or first?'",
             "If the passenger has a stored cabin preference in their profile, suggest it",
             "Call submit_cabin with their answer",
+            "If the caller wants to change route or dates, call restart_search",
         ])
         bc_step.set_step_criteria("Answer submitted via submit_cabin")
-        bc_step.set_functions(["submit_cabin"])
-        bc_step.set_valid_steps(["present_options", "error_recovery"])
+        bc_step.set_functions(["submit_cabin", "restart_search"])
+        bc_step.set_valid_steps(["present_options", "error_recovery", "booking_departure", "get_origin"])
 
         @self.tool(name="submit_cabin",
                    description="Submit the caller's cabin class preference",
@@ -1606,6 +1614,14 @@ class VoyagerAgent(AgentBase):
         )
         def restart_search(args, raw_data):
             reason = args.get("reason", "different_dates")
+            call_id = _call_id(raw_data)
+            # Clear booking asked flags so server-side guards re-fire on re-entry
+            state = load_call_state(call_id)
+            for flag in ["_departure_date_asked", "_return_date_asked",
+                         "_trip_type_asked"]:
+                state.pop(flag, None)
+            save_call_state(call_id, state)
+
             if reason == "different_route":
                 result = SwaigFunctionResult(
                     "Let the caller know we'll start over with a new route."
@@ -1613,9 +1629,10 @@ class VoyagerAgent(AgentBase):
                 _change_step(result, "get_origin")
             else:
                 result = SwaigFunctionResult(
-                    "Let the caller know we'll collect new travel dates."
+                    "Let the caller know we'll collect new travel dates. "
+                    "The trip type is already set — go straight to dates."
                 )
-                _change_step(result, "collect_trip_type")
+                _change_step(result, "booking_departure")
             return result
 
         # 5c. RESTART BOOKING (caller wants different dates from error_recovery)
@@ -1626,10 +1643,17 @@ class VoyagerAgent(AgentBase):
             parameters={"type": "object", "properties": {}, "required": []},
         )
         def restart_booking(args, raw_data):
+            call_id = _call_id(raw_data)
+            state = load_call_state(call_id)
+            for flag in ["_departure_date_asked", "_return_date_asked",
+                         "_trip_type_asked"]:
+                state.pop(flag, None)
+            save_call_state(call_id, state)
             result = SwaigFunctionResult(
-                "Let the caller know we'll collect new travel dates."
+                "Let the caller know we'll collect new travel dates. "
+                "The trip type is already set — go straight to dates."
             )
-            _change_step(result, "collect_trip_type")
+            _change_step(result, "booking_departure")
             return result
 
         # 6. GET FLIGHT PRICE
@@ -1751,10 +1775,12 @@ class VoyagerAgent(AgentBase):
             if not phone:
                 missing.append("phone")
             if missing:
-                return SwaigFunctionResult(
+                result = SwaigFunctionResult(
                     f"Missing passenger details: {' and '.join(missing)}. "
                     "Cannot book without a complete profile."
                 )
+                _change_step(result, "error_recovery")
+                return result
 
             call_id = _call_id(raw_data)
             state = load_call_state(call_id)
