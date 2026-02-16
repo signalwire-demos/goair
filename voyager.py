@@ -309,7 +309,7 @@ class VoyagerAgent(AgentBase):
         greeting = ctx.add_step("greeting")
         greeting.add_section("Task", "Welcome the caller")
         greeting.set_functions("none")
-        greeting.set_valid_steps([])  # Set per caller type in _per_call_config
+        greeting.set_valid_steps(["profile_last_name", "get_destination", "disambiguate_origin"])  # overridden by _per_call_config
 
         # GET ORIGIN
         get_origin = ctx.add_step("get_origin")
@@ -325,7 +325,7 @@ class VoyagerAgent(AgentBase):
         # resolve_location is the only available function; empty text guard is in the tool handler
         get_origin.set_step_criteria("Origin airport resolved and confirmed")
         get_origin.set_functions(["resolve_location"])
-        get_origin.set_valid_steps([])  # resolve_location forces all transitions
+        get_origin.set_valid_steps(["get_destination", "disambiguate_origin"])
 
         # DISAMBIGUATE ORIGIN
         disambiguate_origin = ctx.add_step("disambiguate_origin")
@@ -338,7 +338,7 @@ class VoyagerAgent(AgentBase):
         # select_airport is the only available function; valid_steps enforces transitions
         disambiguate_origin.set_step_criteria("Origin airport stored via select_airport")
         disambiguate_origin.set_functions(["select_airport"])
-        disambiguate_origin.set_valid_steps([])  # select_airport forces transition
+        disambiguate_origin.set_valid_steps(["get_destination"])
 
         # GET DESTINATION
         get_destination = ctx.add_step("get_destination")
@@ -353,7 +353,7 @@ class VoyagerAgent(AgentBase):
         # resolve_location is the only available function; valid_steps enforces transitions
         get_destination.set_step_criteria("Destination airport resolved and confirmed")
         get_destination.set_functions(["resolve_location"])
-        get_destination.set_valid_steps([])  # resolve_location forces all transitions
+        get_destination.set_valid_steps(["collect_trip_type", "disambiguate_destination"])
 
         # DISAMBIGUATE DESTINATION
         disambiguate_destination = ctx.add_step("disambiguate_destination")
@@ -366,7 +366,7 @@ class VoyagerAgent(AgentBase):
         # select_airport is the only available function; valid_steps enforces transitions
         disambiguate_destination.set_step_criteria("Destination airport stored via select_airport")
         disambiguate_destination.set_functions(["select_airport"])
-        disambiguate_destination.set_valid_steps([])  # select_airport forces transition
+        disambiguate_destination.set_valid_steps(["collect_trip_type"])
 
         # COLLECT TRIP TYPE (simple branch point)
         collect_trip_type = ctx.add_step("collect_trip_type")
@@ -378,7 +378,7 @@ class VoyagerAgent(AgentBase):
         ])
         collect_trip_type.set_step_criteria("Trip type confirmed and submitted via select_trip_type")
         collect_trip_type.set_functions(["select_trip_type"])
-        collect_trip_type.set_valid_steps([])  # select_trip_type forces transition
+        collect_trip_type.set_valid_steps(["booking_departure"])
 
         # SEARCH FLIGHTS
         search_flights_step = ctx.add_step("search_flights")
@@ -391,7 +391,7 @@ class VoyagerAgent(AgentBase):
         ])
         search_flights_step.set_step_criteria("Flight search completed")
         search_flights_step.set_functions(["search_flights"])
-        search_flights_step.set_valid_steps([])  # search_flights handler forces all transitions
+        search_flights_step.set_valid_steps(["present_options", "error_recovery"])
 
         # PRESENT OPTIONS
         present_options = ctx.add_step("present_options")
@@ -405,7 +405,7 @@ class VoyagerAgent(AgentBase):
         ])
         present_options.set_step_criteria("Caller selects an option via select_flight or requests new search via restart_search")
         present_options.set_functions(["select_flight", "restart_search"])
-        present_options.set_valid_steps([])
+        present_options.set_valid_steps(["confirm_price", "collect_trip_type", "get_origin"])
 
         # CONFIRM PRICE
         confirm_price = ctx.add_step("confirm_price")
@@ -419,7 +419,7 @@ class VoyagerAgent(AgentBase):
         ])
         confirm_price.set_step_criteria("Caller confirms or declines via confirm_booking or decline_booking")
         confirm_price.set_functions(["get_flight_price", "confirm_booking", "decline_booking"])
-        confirm_price.set_valid_steps([])
+        confirm_price.set_valid_steps(["create_booking", "present_options", "error_recovery"])
 
         # CREATE BOOKING
         create_booking = ctx.add_step("create_booking")
@@ -433,7 +433,7 @@ class VoyagerAgent(AgentBase):
         # book_flight takes no parameters — profile data is read automatically
         create_booking.set_step_criteria("Booking created, PNR read back, call ending")
         create_booking.set_functions(["book_flight"])
-        create_booking.set_valid_steps([])  # book_flight handler forces all transitions
+        create_booking.set_valid_steps(["wrap_up", "error_recovery"])
 
         # ERROR RECOVERY
         error_recovery = ctx.add_step("error_recovery")
@@ -446,7 +446,7 @@ class VoyagerAgent(AgentBase):
         ])
         error_recovery.set_step_criteria("Recovery action taken")
         error_recovery.set_functions(["resolve_location", "search_flights", "restart_booking"])
-        error_recovery.set_valid_steps([])
+        error_recovery.set_valid_steps(["present_options", "collect_trip_type", "get_destination", "disambiguate_origin"])
 
         # WRAP UP
         wrap_up = ctx.add_step("wrap_up")
@@ -538,14 +538,14 @@ class VoyagerAgent(AgentBase):
             question="What is your first name?",
             tool_name="submit_first_name", key_name="first_name",
             storage_ns="profile_answers", next_step="profile_last_name",
-            validator=_not_empty)
+            validator=_not_empty).set_valid_steps(["profile_last_name"])
 
         self._add_question_step(ctx, "profile_last_name",
             task="Collect the caller's last name",
             question="What is your last name?",
             tool_name="submit_last_name", key_name="last_name",
             storage_ns="profile_answers", next_step="profile_dob",
-            validator=_not_empty)
+            validator=_not_empty).set_valid_steps(["profile_dob"])
 
         self._add_question_step(ctx, "profile_dob",
             task="Collect the caller's date of birth",
@@ -553,7 +553,8 @@ class VoyagerAgent(AgentBase):
             tool_name="submit_dob", key_name="date_of_birth",
             storage_ns="profile_answers", next_step="profile_gender",
             confirm=True, validator=_date_format,
-            extra_instructions=["Accept natural language but submit in YYYY-MM-DD format"])
+            extra_instructions=["Accept natural language but submit in YYYY-MM-DD format"]
+        ).set_valid_steps(["profile_gender"])
 
         self._add_question_step(ctx, "profile_gender",
             task="Collect the caller's gender",
@@ -561,14 +562,16 @@ class VoyagerAgent(AgentBase):
             tool_name="submit_gender", key_name="gender",
             storage_ns="profile_answers", next_step="profile_email",
             validator=_gender_val,
-            extra_instructions=["Submit exactly MALE or FEMALE"])
+            extra_instructions=["Submit exactly MALE or FEMALE"]
+        ).set_valid_steps(["profile_email"])
 
         self._add_question_step(ctx, "profile_email",
             task="Collect the caller's email address",
             question="What email should we send confirmations to?",
             tool_name="submit_email", key_name="email",
             storage_ns="profile_answers", next_step="profile_seat_pref",
-            confirm=True, validator=_not_empty)
+            confirm=True, validator=_not_empty
+        ).set_valid_steps(["profile_seat_pref"])
 
         self._add_question_step(ctx, "profile_seat_pref",
             task="Collect the caller's seat preference",
@@ -576,7 +579,8 @@ class VoyagerAgent(AgentBase):
             tool_name="submit_seat_pref", key_name="seat_preference",
             storage_ns="profile_answers", next_step="profile_cabin_pref",
             validator=_seat_val,
-            extra_instructions=["Submit exactly WINDOW or AISLE"])
+            extra_instructions=["Submit exactly WINDOW or AISLE"]
+        ).set_valid_steps(["profile_cabin_pref"])
 
         self._add_question_step(ctx, "profile_cabin_pref",
             task="Collect the caller's cabin preference",
@@ -584,7 +588,8 @@ class VoyagerAgent(AgentBase):
             tool_name="submit_cabin_pref", key_name="cabin_preference",
             storage_ns="profile_answers", next_step="profile_home_airport",
             validator=_cabin_val,
-            extra_instructions=["Submit exactly ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST"])
+            extra_instructions=["Submit exactly ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST"]
+        ).set_valid_steps(["profile_home_airport"])
 
         # profile_home_airport — custom handler (creates passenger inline)
         ha_step = ctx.add_step("profile_home_airport")
@@ -598,7 +603,7 @@ class VoyagerAgent(AgentBase):
         ])
         ha_step.set_step_criteria("Answer submitted via submit_home_airport")
         ha_step.set_functions(["resolve_location", "submit_home_airport"])
-        ha_step.set_valid_steps([])
+        ha_step.set_valid_steps(["get_origin"])
 
         @self.tool(name="submit_home_airport",
                    description="Submit the caller's home airport",
@@ -701,7 +706,8 @@ class VoyagerAgent(AgentBase):
             tool_name="submit_departure", key_name="departure_date",
             storage_ns="booking_answers", next_step=_departure_next,
             confirm=True, validator=_date_not_past,
-            extra_instructions=["Accept natural language but submit in YYYY-MM-DD format"])
+            extra_instructions=["Accept natural language but submit in YYYY-MM-DD format"]
+        ).set_valid_steps(["booking_return", "booking_adults"])
 
         self._add_question_step(ctx, "booking_return",
             task="Collect the return date",
@@ -710,7 +716,8 @@ class VoyagerAgent(AgentBase):
             storage_ns="booking_answers", next_step="booking_adults",
             confirm=True, validator=_return_date_val,
             extra_instructions=["Accept natural language but submit in YYYY-MM-DD format",
-                                "Must be after the departure date"])
+                                "Must be after the departure date"]
+        ).set_valid_steps(["booking_adults"])
 
         self._add_question_step(ctx, "booking_adults",
             task="Collect the number of passengers",
@@ -719,7 +726,8 @@ class VoyagerAgent(AgentBase):
             storage_ns="booking_answers", next_step="booking_cabin",
             validator=_integer_1_8,
             extra_instructions=["Submit as a positive integer (1-8)",
-                                "Maximum 8 — for larger parties, tell the caller to contact a travel agent"])
+                                "Maximum 8 — for larger parties, tell the caller to contact a travel agent"]
+        ).set_valid_steps(["booking_cabin"])
 
         # booking_cabin — custom handler (saves to SQLite, transitions to search)
         bc_step = ctx.add_step("booking_cabin")
@@ -731,7 +739,7 @@ class VoyagerAgent(AgentBase):
         ])
         bc_step.set_step_criteria("Answer submitted via submit_cabin")
         bc_step.set_functions(["submit_cabin"])
-        bc_step.set_valid_steps([])
+        bc_step.set_valid_steps(["present_options", "error_recovery"])
 
         @self.tool(name="submit_cabin",
                    description="Submit the caller's cabin class preference",
@@ -811,7 +819,7 @@ class VoyagerAgent(AgentBase):
             greeting_step = ctx.get_step("greeting")
             greeting_step._sections = []  # Clear base shell
             greeting_step.set_functions(["resolve_location"])
-            greeting_step.set_valid_steps([])  # resolve_location forces all transitions
+            greeting_step.set_valid_steps(["get_destination", "disambiguate_origin"])
 
             home_airport = passenger.get("home_airport_name")
             if home_airport:
@@ -868,7 +876,7 @@ class VoyagerAgent(AgentBase):
                 "Call submit_first_name with their answer",
             ])
             greeting_step.set_functions(["submit_first_name"])
-            greeting_step.set_valid_steps([])
+            greeting_step.set_valid_steps(["profile_last_name"])
             greeting_step.set_step_criteria("First name submitted via submit_first_name")
 
             # Disable profile_first_name — greeting handles it
