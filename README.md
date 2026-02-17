@@ -361,6 +361,99 @@ goair/
 └── calls/                # Saved call data JSON files (auto-created)
 ```
 
+## Global Data Reference
+
+`global_data` is the lightweight shared state visible to the AI on every request. It is populated by `_per_call_config`, the gather_info steps, and tool results. Here is the full schema with a real example:
+
+```json
+{
+  "passenger_profile": {
+    "phone": "+19184249378",        // Caller ID — used as the passenger's unique key
+    "first_name": "Brian",
+    "last_name": "West",
+    "date_of_birth": "1977-02-18", // YYYY-MM-DD
+    "gender": "MALE",              // MALE or FEMALE
+    "email": "brian.west@gmail.com",
+    "seat_preference": "AISLE",    // WINDOW or AISLE
+    "cabin_preference": "ECONOMY", // ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST
+    "home_airport_iata": "TUL",
+    "home_airport_name": "Tulsa International (TUL)"
+  },
+  "is_new_caller": false,           // true until profile is saved, then false
+  "caller_phone": "+19184249378",   // E.164 from SignalWire call.from
+  "caller_id_name": "+19184249378", // Display name from carrier (often same as number)
+  "caller_id_number": "+19184249378",
+
+  "booking_answers": {              // Set by collect_booking gather_info step
+    "departure_date": "2026-12-01", // YYYY-MM-DD
+    "return_date": "ONEWAY",        // YYYY-MM-DD or "ONEWAY" for one-way trips
+    "adults": 1,                    // 1–8
+    "cabin_class": "ECONOMY"        // ECONOMY, PREMIUM_ECONOMY, BUSINESS, or FIRST
+  },
+
+  "booking_state": {                // Lightweight summary built by build_ai_summary() in state_store.py
+                                    // Heavy JSON (full offers) stays in SQLite — only scalars and
+                                    // text summaries are included here to keep the AI context small.
+    "origin": {
+      "iata": "TUL",
+      "name": "Tulsa International",
+      "city": "Tulsa",
+      "lat": 36.155138,            // Set from Google Maps geocode or airport DB fallback
+      "lng": -95.989501
+    },
+    "destination": {
+      "iata": "MIA",
+      "name": "Miami International",
+      "city": "Miami",
+      "lat": 25.76168,
+      "lng": -80.19179
+    },
+    "destination_candidates": [    // Present only during/after disambiguation
+      { "iata": "MIA", "name": "Miami International", "city": "Miami" },
+      { "iata": "FLL", "name": "Fort Lauderdale-Hollywood International", "city": "Fort Lauderdale" },
+      { "iata": "PBI", "name": "Palm Beach International", "city": "West Palm Beach" }
+    ],
+    "trip_type": "one_way",        // "one_way" or "round_trip"
+    "departure_date": "2026-12-01",
+    "adults": 1,
+    "cabin_class": "ECONOMY",
+    "has_flight_offers": true,     // true once search_flights has run successfully
+    "has_flight_offer": true,      // true once the caller has picked an option via select_flight
+    "has_priced_offer": true,      // true once get_flight_price has confirmed the fare
+    "flight_summaries": [          // Voice-ready strings for the AI to read to the caller
+      "Option 1: Outbound: Frontier Airlines, nonstop, departs 9 PM, arrives 12:50 AM, 2h 50m. $223.78 USD",
+      "Option 2: Outbound: Delta Air Lines, nonstop, departs 6 AM, arrives 9:50 AM, 2h 50m. $230.56 USD",
+      "Option 3: Outbound: American Airlines, nonstop, departs 4 PM, arrives 7:50 PM, 2h 50m. $298.57 USD"
+    ],
+    "flight_summary": "Option 1: Outbound: Frontier Airlines, nonstop, departs 9 PM, arrives 12:50 AM, 2h 50m. $223.78 USD",
+    "confirmed_price": "$228.86 USD", // Set by get_flight_price (mock adds 1–3% variance)
+    "booking": {                   // Set by book_flight after successful PNR creation
+      "pnr": "2IEZME",
+      "phonetic": "Two India Echo Zulu Mike Echo", // NATO phonetic — read aloud by the AI
+      "route": "TUL to MIA",
+      "departure": "2026-12-01",
+      "price": "228.86",
+      "passenger": "Brian West",
+      "email": "brian.west@gmail.com",
+      "phone": "+19184249378"
+    }
+  }
+}
+```
+
+### Field lifecycle
+
+| Field | Set by | Cleared by |
+|-------|--------|------------|
+| `passenger_profile` | `_per_call_config` (returning) or `save_profile` tool (new) | Never (persists for call) |
+| `is_new_caller` | `_per_call_config` | `save_profile` sets it to `false` |
+| `booking_answers` | `collect_booking` gather_info step | `restart_search` / `restart_booking` |
+| `booking_state.*` | `_sync_summary()` called inside each tool result | Replaced on each tool call |
+| `booking_state.has_flight_offers` | `search_flights` tool | Reset on `restart_search` |
+| `booking_state.has_flight_offer` | `select_flight` tool | Reset on `restart_search` |
+| `booking_state.has_priced_offer` | `get_flight_price` tool | Reset on `restart_search` |
+| `booking_state.booking` | `book_flight` tool | Never |
+
 ## Mock API vs Live Amadeus
 
 The mock API is designed as a drop-in replacement. To switch to live Amadeus, replace the imports in `voyager.py`:
