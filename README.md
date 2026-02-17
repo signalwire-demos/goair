@@ -363,7 +363,7 @@ goair/
 
 ## Global Data Reference
 
-`global_data` is the lightweight shared state visible to the AI on every request. It is populated by `_per_call_config`, the gather_info steps, and tool results. Here is the full schema with a real example:
+`global_data` is backend-only shared state — the AI cannot see it directly. It is accessible to SWAIG tool functions via `raw_data["global_data"]` and to `_per_call_config` via `agent.update_global_data()`. It is populated by `_per_call_config`, the gather_info steps, and tool results. Here is the full schema with a real example:
 
 ```json
 {
