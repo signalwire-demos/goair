@@ -11,7 +11,7 @@
 
 ## How It Works
 
-A caller dials a SignalWire phone number. Voyager answers, recognizes returning passengers by caller ID, and walks them through the entire booking flow conversationally. New callers set up a profile first via the `info_gatherer` skill — it sequences questions automatically without per-field state-machine steps. Returning callers skip straight to "Where are you flying?"
+A caller dials a SignalWire phone number. Voyager answers, recognizes returning passengers by caller ID, and walks them through the entire booking flow conversationally. New callers set up a profile first via `gather_info` mode — it collects 8 profile fields with native confirmation handling. Returning callers skip straight to "Where are you flying?"
 
 ```
                           Caller dials in
@@ -28,15 +28,11 @@ A caller dials a SignalWire phone number. Voyager answers, recognizes returning 
                          │           │
                          v           │
                    collect_profile   │
-                   (info_gatherer    │
-                    skill: profile)  │
+                   (gather_info:     │
+                    8 questions)     │
                          │           │
-                  resolve_location   │
-                  (mode=verify for   │
-                   home airport)     │
-                         │           │
-                    finalize_profile │
-                   (extracts IATA)   │
+                  save_profile_step  │
+                  (create passenger) │
                          │           │
                          └─────┬─────┘
                                v
@@ -57,24 +53,17 @@ A caller dials a SignalWire phone number. Voyager answers, recognizes returning 
          │               │        Collect Trip Type
          │               │          (select_trip_type)
          │               │               │
-         │               │          ┌────┴────┐
-         │               │     round-trip?  one-way?
-         │               │          │         │
-         │               │          v         v
-         │               │   collect_booking  collect_booking
-         │               │     _roundtrip       _oneway
-         │               │   (info_gatherer   (info_gatherer
-         │               │    skill)           skill)
-         │               │          │         │
-         │               │          └────┬────┘
          │               │               v
-         │               │        finalize_booking
+         │               │         collect_booking
+         │               │          (gather_info:
+         │               │          4 questions)
          │               │               │
          │               │               v
-         │               │        Search Flights ──────┐
-         │               │               │             │
-         │               │               v             │
-         │  (change      │       Present Options       │
+         │               │        search_and_present
+         │               │         (search flights)
+         │               │               │
+         │               │               v
+         │  (change      │       Present Options ──────┐
          │   route)      │               │             │
          │               │               v             │
          │               │        Confirm Price        │
@@ -113,7 +102,7 @@ A caller dials a SignalWire phone number. Voyager answers, recognizes returning 
 
 | Component | Purpose |
 |-----------|---------|
-| **voyager.py** | Main agent — state machine, SWAIG tools, info_gatherer skills, per-call config |
+| **voyager.py** | Main agent — state machine, SWAIG tools, gather_info steps, per-call config |
 | **mock_flight_api.py** | Mock flight API — Amadeus-compatible response shapes with realistic data generation |
 | **state_store.py** | SQLite persistence for call state, bookings, and passenger profiles |
 | **config.py** | Environment variable loader and validation |
@@ -144,13 +133,13 @@ Set `MOCK_DELAYS=true` in your environment to enable the delays. They are **off 
 ### Passenger Profiles
 - Passengers are identified by caller ID (phone number)
 - First-time callers go through a one-time profile setup: name, email, DOB, gender, seat preference, cabin preference, home airport
-- Profile questions are handled by the `info_gatherer` skill (prefix: `profile`) — it sequences questions automatically with built-in confirmation support
+- Profile questions are collected via `gather_info` mode in the `collect_profile` step — it sequences 8 questions with native confirmation handling (`confirm=True`)
 - Returning callers are greeted by name — profile data pre-fills everything
 - Profiles are stored in SQLite and persist across calls
-- Home airport is resolved to an IATA code during profile setup via `resolve_location(mode='verify')` — the resolved name and code are stored as `"Airport Name (IATA)"` and the IATA code is extracted by `finalize_profile`
+- The `save_profile` tool extracts the IATA code from the home airport response and creates the passenger record
 
 ### State Machine
-Voyager uses a strict state machine with 15 steps. Each step has:
+Voyager uses a strict state machine with 16 steps. Each step has:
 - **Task** — what the AI does in this step
 - **Process** — step-by-step instructions
 - **Functions** — which SWAIG tools are available (all others are disabled)
@@ -158,14 +147,17 @@ Voyager uses a strict state machine with 15 steps. Each step has:
 
 This prevents the AI from jumping ahead, skipping steps, or calling tools out of order.
 
-Profile and booking data collection uses the `info_gatherer` skill (three instances with prefixes `profile`, `oneway`, `roundtrip`). All instances use `skip_prompt: True` to suppress the skill's default POM section — the conversation flow is managed entirely by step-level instructions. Each instance declares its questions as config — the skill handles sequencing, confirmation prompts, and answer storage in `global_data`. Bridge handlers (`finalize_profile`, `finalize_booking`) fire after each skill completes to validate, persist to SQLite, and transition to the next phase.
+Profile and booking data collection uses SignalWire's native `gather_info` mode:
+- **collect_profile** — 8 questions with `completion_action="next_step"` and `confirm=True` for selected fields
+- **collect_booking** — 4 questions (departure date, return date, passengers, cabin class)
+
+Answers are stored in `global_data` under `profile_answers` and `booking_answers`. The `save_profile` tool processes profile data and creates the passenger record after collection completes.
 
 ### Per-Call Dynamic Config
 The `_per_call_config` callback runs before each request. The SDK creates an ephemeral copy of the agent — mutations never leak between calls. The callback:
 - Looks up the passenger by phone number
-- Merges caller data into `global_data` (using `update_global_data` to preserve skill state)
-- Modifies the state machine: returning callers skip `collect_profile` and go to `get_origin`; new callers start in `greeting` with `profile_start_questions` available so the profile flow begins immediately
-- A server-side guardrail forces `resolve_location` to `mode='verify'` during profile collection (when `is_new_caller=True` and no profile exists yet)
+- Merges caller data into `global_data` (using `update_global_data`)
+- Modifies the state machine: returning callers skip `collect_profile` and go straight to `get_destination` (or `disambiguate_origin` if home airport needs selection); new callers start in `greeting` which transitions to `collect_profile`
 
 ### Booking Flow
 1. **Search** — `search_flights` uses the mock API to return up to 3 options with voice-friendly summaries
@@ -190,38 +182,40 @@ A single-page web dashboard at `/` shows all bookings with:
 
 | Step | Functions | Next Steps | Purpose |
 |------|-----------|------------|---------|
-| `greeting` | `profile_start_questions` (new) / none (returning) | `collect_profile` (new) / `get_origin` (returning) | Welcome caller, start profile questions for new callers |
-| `collect_profile` | `profile_start_questions`, `profile_submit_answer`, `finalize_profile`, `resolve_location` | `get_origin` | Collect new caller profile via info_gatherer, verify home airport |
+| `greeting` | none | `collect_profile` (new) / `get_destination` (returning) | Welcome caller |
+| `collect_profile` | *gather_info* | `save_profile_step` | Collect 8 profile fields via gather_info mode |
+| `save_profile_step` | `save_profile` | `get_origin` | Save profile to database, create passenger record |
 | `get_origin` | `resolve_location` | `disambiguate_origin`, `get_destination` | Resolve departure airport |
 | `disambiguate_origin` | `select_airport` | `get_destination` | Choose between multiple origin airports |
 | `get_destination` | `resolve_location` | `disambiguate_destination`, `collect_trip_type` | Resolve arrival airport |
 | `disambiguate_destination` | `select_airport` | `collect_trip_type` | Choose between multiple destination airports |
-| `collect_trip_type` | `select_trip_type` | `collect_booking_oneway`, `collect_booking_roundtrip` | Branch on round-trip vs one-way |
-| `collect_booking_oneway` | `oneway_start_questions`, `oneway_submit_answer`, `finalize_booking` | `search_flights` | Collect one-way booking details via info_gatherer |
-| `collect_booking_roundtrip` | `roundtrip_start_questions`, `roundtrip_submit_answer`, `finalize_booking` | `search_flights` | Collect round-trip booking details via info_gatherer |
-| `search_flights` | `search_flights` | `present_options`, `error_recovery` | Search for flights |
-| `present_options` | `select_flight` | `confirm_price`, `search_flights`, `collect_trip_type`, `error_recovery` | Read options, caller picks one |
-| `confirm_price` | `get_flight_price` | `create_booking`, `present_options` | Confirm live price |
+| `collect_trip_type` | `select_trip_type` | `collect_booking` | Ask round-trip or one-way |
+| `collect_booking` | *gather_info* | `search_and_present` | Collect 4 booking fields via gather_info mode |
+| `search_and_present` | `search_flights` | `present_options`, `error_recovery` | Search for available flights |
+| `search_flights` | `search_flights` | `present_options`, `error_recovery` | Re-search (error recovery path) |
+| `present_options` | `select_flight`, `restart_search` | `confirm_price`, `collect_booking`, `get_origin` | Read options, caller picks one |
+| `confirm_price` | `get_flight_price`, `confirm_booking`, `decline_booking` | `create_booking`, `present_options`, `error_recovery` | Confirm live price |
 | `create_booking` | `book_flight` | `wrap_up`, `error_recovery` | Book, send SMS, read PNR |
-| `error_recovery` | `resolve_location`, `search_flights` | `get_origin`, `get_destination`, `collect_trip_type`, `search_flights`, `present_options` | Handle failures without re-collecting passenger info |
+| `error_recovery` | `search_flights`, `restart_booking`, `restart_search` | `present_options`, `collect_booking`, `get_origin` | Handle failures, route changes, date changes |
 | `wrap_up` | none | (end) | Say goodbye |
 
 ## SWAIG Tools
 
 | Tool | Parameters | Purpose |
 |------|-----------|---------|
-| `resolve_location` | `location_text`, `location_type`, `mode` | Google Maps geocoding + mock keyword/proximity search to resolve spoken locations to IATA codes. `mode='verify'` returns the result without changing step (used during profile setup); `mode='normal'` (default) writes to call state and advances the step |
+| `resolve_location` | `location_text`, `location_type`, `mode` | Google Maps geocoding + mock keyword/proximity search to resolve spoken locations to IATA codes |
 | `select_airport` | `location_type`, `iata_code` | Pick one airport from disambiguation candidates |
-| `select_trip_type` | `trip_type` | Record round-trip or one-way, branch to the correct booking flow |
-| `finalize_profile` | (none) | Read info_gatherer answers from `global_data`, create passenger record in SQLite, populate `global_data.passenger_profile` |
-| `finalize_booking` | (none) | Read info_gatherer answers from `global_data`, validate dates (rejects past dates, return before departure), store booking details in call state |
-| `search_flights` | (none) | Search using stored state, returns up to 3 voice-friendly summaries |
+| `select_trip_type` | `trip_type`, `confirmed` | Record round-trip or one-way, transition to `collect_booking` |
+| `save_profile` | (none) | Read `profile_answers` from `global_data`, create passenger record in SQLite, force transition to `get_origin` |
+| `search_flights` | (none) | Read `booking_answers` from `global_data`, search using mock API, return up to 3 voice-friendly summaries, force transition to `present_options` |
 | `select_flight` | `option_number` | Lock in the caller's choice (1, 2, or 3) |
+| `restart_search` | `reason` | Restart search with different dates or different route |
+| `restart_booking` | (none) | Go back to `collect_booking` for new dates |
 | `get_flight_price` | (none) | Confirm live price via mock pricing API |
+| `confirm_booking` | (none) | Caller accepted price, proceed to booking |
+| `decline_booking` | (none) | Caller declined price, go back to options |
 | `book_flight` | (none) | Book flight + SMS confirmation. Uses passenger profile from `global_data`. Filler: "Booking that for you now" (en-US) |
 | `summarize_conversation` | `summary` | Post-call summary (called automatically) |
-
-The `info_gatherer` skill also registers its own tools per prefix: `{prefix}_start_questions` and `{prefix}_submit_answer`. These are managed by the skill and called by the AI during profile/booking collection steps.
 
 All tools use `wait_file="/sounds/typing.mp3"` — the SDK resolves the relative path to a full URL using the agent's base URL.
 
@@ -342,7 +336,7 @@ Persistent passenger profiles keyed by phone number.
 
 ```
 goair/
-├── voyager.py            # Main agent (state machine, tools, info_gatherer skills, per-call config)
+├── voyager.py            # Main agent (state machine, tools, gather_info steps, per-call config)
 ├── mock_flight_api.py    # Mock flight API (Amadeus-compatible response shapes)
 ├── state_store.py        # SQLite state store (call state, bookings, passengers)
 ├── config.py             # Environment variable loader
@@ -350,7 +344,6 @@ goair/
 ├── .env.example          # Environment template
 ├── test_flow.sh          # SWAIG function integration tests (swaig-test CLI)
 ├── test_roundtrip.py     # Roundtrip booking flow unit tests
-├── INFO.md               # Detailed technical reference (APIs, state machine, resolution pipeline)
 ├── Procfile              # Heroku/Dokku process definition
 ├── app.json              # Heroku app manifest
 ├── CHECKS                # Dokku zero-downtime deploy health check

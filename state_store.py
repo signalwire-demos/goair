@@ -178,6 +178,8 @@ def build_ai_summary(state):
         summary["destination_candidates"] = state["destination_candidates"]
 
     # Travel params
+    if state.get("trip_type"):
+        summary["trip_type"] = state["trip_type"]
     if state.get("departure_date"):
         summary["departure_date"] = state["departure_date"]
     if state.get("return_date"):

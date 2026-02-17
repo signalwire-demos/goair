@@ -618,6 +618,11 @@ def mock_search_airports(keyword):
     return results[:5]
 
 
+def mock_get_airport(iata):
+    """Return the raw airport record for a given IATA code, or None if not found."""
+    return AIRPORTS.get(iata.upper())
+
+
 def mock_nearest_airports(lat, lng):
     """Find nearest airports by coordinates using haversine distance.
 

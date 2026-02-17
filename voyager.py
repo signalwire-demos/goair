@@ -16,6 +16,7 @@ import config
 from mock_flight_api import (
     mock_search_airports,
     mock_nearest_airports,
+    mock_get_airport,
     mock_search_flights,
     mock_price_offer,
     mock_create_order,
@@ -38,6 +39,7 @@ config.validate()
 
 _search_airports = mock_search_airports
 _nearest_airports = mock_nearest_airports
+_get_airport = mock_get_airport
 _search_flights = mock_search_flights
 _price_offer = mock_price_offer
 _create_order = mock_create_order
@@ -174,7 +176,9 @@ class VoyagerAgent(AgentBase):
 
         # AI model
         self.set_param("ai_model", config.AI_MODEL)
-        self.set_param("end_of_speech_timeout", 500)
+        self.set_param("thinking_model", "gpt-oss-120b@groq.ai")
+        self.set_param("enable_thinking", True)
+
         self.set_prompt_llm_params(top_p=0.9, temperature=0.3)
 
         # Personality
@@ -187,7 +191,6 @@ class VoyagerAgent(AgentBase):
         self.prompt_add_section("Rules", body="", bullets=[
             "This is a PHONE CALL. Keep every response to 1-2 short sentences.",
             "Use airline names not codes ('Delta' not 'DL'). Say times naturally ('seven thirty PM' not '19:30').",
-            "Spell confirmation codes using the NATO phonetic alphabet.",
             "Avoid commas in speech — use 'and' or 'or' instead. Keep sentences short and direct.",
         ])
 
@@ -315,15 +318,14 @@ class VoyagerAgent(AgentBase):
         get_origin = ctx.add_step("get_origin")
         get_origin.add_section("Task", "Collect the departure city or airport")
         get_origin.add_bullets("Process", [
-            "Ask where they're flying from, then call resolve_location with location_text and location_type='origin'",
-            "If caller says an IATA code directly ('I'm flying from LAX'), still call resolve_location to validate it",
-            "After resolve_location returns, tell the caller which airport was found and ask if that's correct",
-            "If they confirm, move to get_destination",
-            "If multiple airports are returned, move to disambiguate_origin",
-            "If no match, ask the caller to try a different city name",
+            "Check if ${origin.name} is already set from their home airport",
+            "If set, ask: 'Would you like to fly from ${origin.name} or somewhere else?'",
+            "If they confirm, proceed to next step",
+            "If they want a different airport or origin is not set, ask where they're flying from",
+            "Call resolve_location with their answer and location_type='origin'",
+            "Once the airport is confirmed, proceed to next step",
         ])
-        # resolve_location is the only available function; empty text guard is in the tool handler
-        get_origin.set_step_criteria("Origin airport resolved and confirmed")
+        get_origin.set_step_criteria("Origin airport confirmed and saved")
         get_origin.set_functions(["resolve_location"])
         get_origin.set_valid_steps(["get_destination", "disambiguate_origin"])
 
@@ -345,13 +347,9 @@ class VoyagerAgent(AgentBase):
         get_destination.add_section("Task", "Collect the arrival city or airport")
         get_destination.add_bullets("Process", [
             "Ask where they're flying to — or if they already said a destination, call resolve_location right away with location_type='destination'",
-            "After resolve_location returns, tell the caller which airport was found and ask if that's correct",
-            "If they confirm, move to collect_trip_type",
-            "If multiple airports are returned, move to disambiguate_destination",
-            "If no match, ask the caller for clarification",
+            "Once the airport is confirmed, proceed to next step",
         ])
-        # resolve_location is the only available function; valid_steps enforces transitions
-        get_destination.set_step_criteria("Destination airport resolved and confirmed")
+        get_destination.set_step_criteria("Destination airport confirmed and saved")
         get_destination.set_functions(["resolve_location"])
         get_destination.set_valid_steps(["collect_trip_type", "disambiguate_destination"])
 
@@ -385,9 +383,6 @@ class VoyagerAgent(AgentBase):
         search_flights_step.add_section("Task", "Re-search flights (used only for error recovery — happy path searches inline via submit_cabin)")
         search_flights_step.add_bullets("Process", [
             "Call search_flights to find available flights",
-            "The function returns up to 3 options pre-summarized for voice",
-            "Move to present_options to read them to the caller",
-            "If no results: move to error_recovery",
         ])
         search_flights_step.set_step_criteria("Flight search completed")
         search_flights_step.set_functions(["search_flights"])
@@ -399,6 +394,7 @@ class VoyagerAgent(AgentBase):
         present_options.add_bullets("Process", [
             "Read each flight option from booking_state.flight_summaries — include airline, stops, times, duration, and price",
             "Label them 'Option 1' then 'Option 2' then 'Option 3'",
+            "The caller prefers a ${global_data.passenger_profile.seat_preference} seat — mention it naturally when relevant",
             "Ask which option they'd like or if they want to try different dates or a different route",
             "When the caller picks one, call select_flight with that option_number",
             "If caller wants different dates or a different route, call restart_search",
@@ -412,10 +408,6 @@ class VoyagerAgent(AgentBase):
         confirm_price.add_section("Task", "Confirm the live price on the selected flight")
         confirm_price.add_bullets("Process", [
             "Call get_flight_price to confirm the live fare",
-            "Read back the confirmed price and baggage allowance to the caller",
-            "Ask: 'Shall I go ahead and book this?'",
-            "If they say yes, call confirm_booking",
-            "If they say no, call decline_booking",
         ])
         confirm_price.set_step_criteria("Caller confirms or declines via confirm_booking or decline_booking")
         confirm_price.set_functions(["get_flight_price", "confirm_booking", "decline_booking"])
@@ -426,8 +418,7 @@ class VoyagerAgent(AgentBase):
         create_booking.add_section("Task", "Book the flight and wrap up")
         create_booking.add_bullets("Process", [
             "Call book_flight to create the reservation",
-            "Read the PNR back to the caller using the NATO phonetic spelling provided",
-            "Let them know the confirmation has been texted to their phone",
+            "Read the PNR back to the caller using the phonetic spelling provided",
             "Thank them and say goodbye",
         ])
         # book_flight takes no parameters — profile data is read automatically
@@ -465,12 +456,11 @@ class VoyagerAgent(AgentBase):
         # ── Profile Collection (gather_info mode) ──
 
         ctx.add_step("collect_profile") \
-            .set_text("Now let's start booking your flight.") \
+            .set_text("Welcome the caller, then collect their profile.") \
             .set_gather_info(
                 output_key="profile_answers",
                 completion_action="next_step",
-                prompt="Welcome to Voyager! I'd love to help you book a flight. "
-                       "Let me get your profile set up first."
+                prompt="First say: 'Welcome to Voyager! I'd love to help you book a flight.' Then collect the passenger's profile by asking each question. IMPORTANT: Only call gather_submit after the user has explicitly confirmed their answer with 'yes' or equivalent. Never call gather_submit speculatively or with confirmed_by_user set to false."
             ) \
             .add_gather_question("first_name", "What is your first name?") \
             .add_gather_question("last_name", "What is your last name?") \
@@ -504,7 +494,7 @@ class VoyagerAgent(AgentBase):
                 "home_airport",
                 "What airport do you usually fly from?",
                 confirm=True,
-                prompt="Accept city or airport name. Format answer as 'Airport Name (CODE)'"
+                prompt="Accept city or airport name. Submit exactly what the caller says."
             ) \
             .set_valid_steps(["save_profile_step"])
 
@@ -524,17 +514,54 @@ class VoyagerAgent(AgentBase):
         def _save_profile(args, raw_data):
             global_data = (raw_data or {}).get("global_data", {})
             caller_phone = global_data.get("caller_phone", "")
+            call_id = (raw_data or {}).get("call_id", "unknown")
+            state = load_call_state(call_id)
             answers = global_data.get("profile_answers", {})
 
             home_airport_value = answers.get("home_airport", "")
 
-            # Extract IATA code
+            # Extract or lookup IATA code
             home_airport_iata = None
+            home_airport_full_name = home_airport_value
+
+            # First try to extract existing IATA code from answer
             iata_match = re.search(r"\(([A-Z]{3})\)", home_airport_value)
             if not iata_match:
-                iata_match = re.search(r"\b([A-Za-z]{3})\b", home_airport_value)
+                iata_match = re.search(r"\b([A-Z]{3})\b", home_airport_value)
+
             if iata_match:
                 home_airport_iata = iata_match.group(1).upper()
+            else:
+                # No IATA code found - search for the airport by name
+                # Try multiple search variations
+                search_terms = [home_airport_value]
+
+                # If it's "City, State" format, also try just the city name
+                if "," in home_airport_value:
+                    city_part = home_airport_value.split(",")[0].strip()
+                    search_terms.append(city_part)
+
+                airport_results = None
+                for term in search_terms:
+                    airport_results = _search_airports(term)
+                    if airport_results:
+                        airport = airport_results[0]
+                        home_airport_iata = airport.get("iataCode", "").upper()
+                        home_airport_full_name = f"{airport.get('name', home_airport_value).title()} ({home_airport_iata})"
+                        logger.info(f"save_profile: looked up '{home_airport_value}' (searched: '{term}') -> {home_airport_iata}")
+                        break
+
+            # Validate and set home airport as origin
+            if home_airport_iata:
+                airport_results = _search_airports(home_airport_iata)
+                if airport_results:
+                    airport = airport_results[0]  # Take first match
+                    state["origin"] = {
+                        "iata": airport.get("iataCode", home_airport_iata),
+                        "name": airport.get("name", "").title(),
+                        "city": airport.get("address", {}).get("cityName", "").title(),
+                    }
+                    logger.info(f"save_profile: set state['origin'] = {home_airport_iata}")
 
             # Create passenger
             create_passenger(
@@ -547,7 +574,7 @@ class VoyagerAgent(AgentBase):
                 seat_preference=answers.get("seat_preference"),
                 cabin_preference=answers.get("cabin_preference"),
                 home_airport_iata=home_airport_iata,
-                home_airport_name=home_airport_value,
+                home_airport_name=home_airport_full_name,
             )
 
             profile = {
@@ -560,12 +587,16 @@ class VoyagerAgent(AgentBase):
                 "seat_preference": answers.get("seat_preference"),
                 "cabin_preference": answers.get("cabin_preference"),
                 "home_airport_iata": home_airport_iata,
-                "home_airport_name": home_airport_value,
+                "home_airport_name": home_airport_full_name,
             }
 
-            result = SwaigFunctionResult(
-                f"Profile saved for {answers.get('first_name', '')} {answers.get('last_name', '')}."
-            )
+            save_call_state(call_id, state)
+
+            msg = f"Profile saved for {answers.get('first_name', '')} {answers.get('last_name', '')}."
+            if home_airport_iata and state.get("origin"):
+                msg += f" Home airport {home_airport_full_name} is set as departure airport."
+
+            result = SwaigFunctionResult(msg)
             result.update_global_data({
                 "passenger_profile": profile,
                 "is_new_caller": False,
@@ -580,7 +611,7 @@ class VoyagerAgent(AgentBase):
             .set_gather_info(
                 output_key="booking_answers",
                 completion_action="next_step",
-                prompt="Now let's plan your trip."
+                prompt="Now let's plan your trip, ${global_data.passenger_profile.first_name}."
             ) \
             .add_gather_question(
                 "departure_date",
@@ -592,8 +623,9 @@ class VoyagerAgent(AgentBase):
                 "return_date",
                 "When would you like to return?",
                 confirm=True,
-                prompt="Accept natural language but submit in YYYY-MM-DD format. Must be after departure date. "
-                       "For one-way trips, submit the word ONEWAY instead of a date."
+                prompt="Check ${booking_state.trip_type}. If it is 'one_way', submit 'ONEWAY' immediately without asking the caller. "
+                       "Only ask 'When would you like to return?' if the trip type is 'round_trip'. "
+                       "Accept natural language but submit in YYYY-MM-DD format. Must be after departure date."
             ) \
             .add_gather_question(
                 "adults",
@@ -603,9 +635,8 @@ class VoyagerAgent(AgentBase):
             ) \
             .add_gather_question(
                 "cabin_class",
-                "What cabin class?",
-                prompt="Options: ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST. "
-                       "Suggest the passenger's stored preference if available in ${passenger_profile}"
+                "What cabin class would you like — you usually fly ${global_data.passenger_profile.cabin_preference}?",
+                prompt="Options: ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST."
             ) \
             .set_valid_steps(["search_and_present"])
 
@@ -615,7 +646,6 @@ class VoyagerAgent(AgentBase):
             .add_bullets("Process", [
                 "Booking details are in ${booking_answers}",
                 "Call search_flights to find available flights",
-                "The search will return up to 3 options and transition to present_options"
             ]) \
             .set_step_criteria("Search completed") \
             .set_functions(["search_flights"]) \
@@ -652,7 +682,7 @@ class VoyagerAgent(AgentBase):
             # Modify greeting to skip profile collection
             ctx = agent._contexts_builder.get_context("default")
             greeting_step = ctx.get_step("greeting")
-            greeting_step._sections = []
+            greeting_step.clear_sections()
             greeting_step.set_functions(["resolve_location"])
             greeting_step.set_valid_steps(["get_destination", "disambiguate_origin"])
 
@@ -696,19 +726,11 @@ class VoyagerAgent(AgentBase):
                 "caller_phone": caller_phone,
             })
 
-            # Greeting starts profile collection
+            # Skip greeting and start at collect_profile (which includes greeting)
             ctx = agent._contexts_builder.get_context("default")
-            greeting_step = ctx.get_step("greeting")
-            greeting_step._sections = []
-            greeting_step.add_section("Task", "Welcome new caller and start profile")
-            greeting_step.add_bullets("Process", [
-                "Say: 'Welcome to Voyager! I'd love to help you book a flight.'",
-                "Explain you'll collect their profile",
-                "Move to collect_profile step"
-            ])
-            greeting_step.set_functions("none")
-            greeting_step.set_valid_steps(["collect_profile"])
-            greeting_step.set_step_criteria("Ready to collect profile")
+            ctx.move_step("collect_profile", 0)
+            ctx.move_step("save_profile_step", 1)
+            ctx.remove_step("greeting")
 
     def _define_tools(self):
         """Define all SWAIG tool functions."""
@@ -879,9 +901,14 @@ class VoyagerAgent(AgentBase):
                     "name": top["name"],
                     "city": top["city"],
                 }
-                if geo:
-                    airport_info["lat"] = geo["lat"]
-                    airport_info["lng"] = geo["lng"]
+                coords = geo or {}
+                if not coords:
+                    db_entry = _get_airport(top["iata"])
+                    if db_entry:
+                        coords = {"lat": db_entry["lat"], "lng": db_entry["lng"]}
+                if coords:
+                    airport_info["lat"] = coords["lat"]
+                    airport_info["lng"] = coords["lng"]
 
                 logger.info(f"resolve_location: auto-selected {top['iata']} for {location_type}")
 
@@ -891,18 +918,19 @@ class VoyagerAgent(AgentBase):
                         f"{' in ' + top['city'] if top['city'] else ''}."
                     )
 
+                # Single match: Save to state immediately
                 state[location_type] = airport_info
-                next_step = "get_destination" if location_type == "origin" else "collect_trip_type"
+                logger.info(f"resolve_location: set state['{location_type}'] = {top['iata']}")
+
                 result = SwaigFunctionResult(
                     f"The closest major airport is {top['name']} ({top['iata']})"
                     f"{' in ' + top['city'] if top['city'] else ''}. "
-                    f"Saved as {location_type}. "
                     f"Tell the caller and ask if that's correct before proceeding."
                 )
                 result.add_dynamic_hints([h for h in [top["name"], top["city"]] if h])
                 save_call_state(call_id, state)
                 _sync_summary(result, state)
-                _change_step(result, next_step)
+                # DON'T force step change - let AI confirm with caller first
                 return result
             else:
                 # Multiple airports — need disambiguation
@@ -921,6 +949,8 @@ class VoyagerAgent(AgentBase):
                     {"iata": a["iata"], "name": a["name"], "city": a["city"]}
                     for a in top_3
                 ]
+                if geo:
+                    state[f"{location_type}_geo"] = {"lat": geo["lat"], "lng": geo["lng"]}
                 logger.info(f"resolve_location: {len(top_3)} candidates for {location_type}")
 
                 disambig_step = f"disambiguate_{location_type}"
@@ -988,13 +1018,23 @@ class VoyagerAgent(AgentBase):
                     "Ask the caller to choose from these."
                 )
 
-            # Store selected airport
-            state[location_type] = {
+            # Store selected airport — prefer city geo saved during resolve_location,
+            # fall back to the airport's own coordinates from the database.
+            airport_info = {
                 "iata": selected["iata"],
                 "name": selected["name"],
                 "city": selected["city"],
             }
-            logger.info(f"select_airport: set state['{location_type}'] = {selected['iata']}")
+            geo = state.get(f"{location_type}_geo")
+            if not geo:
+                db_entry = _get_airport(selected["iata"])
+                if db_entry:
+                    geo = {"lat": db_entry["lat"], "lng": db_entry["lng"]}
+            if geo:
+                airport_info["lat"] = geo["lat"]
+                airport_info["lng"] = geo["lng"]
+            state[location_type] = airport_info
+            logger.info(f"select_airport: set state['{location_type}'] = {selected['iata']} (lat/lng: {bool(geo)})")
 
             next_step = "get_destination" if location_type == "origin" else "collect_trip_type"
             result = SwaigFunctionResult(
@@ -1775,8 +1815,7 @@ class VoyagerAgent(AgentBase):
                 f"Booked! Confirmation code is {pnr} — that's {phonetic}. "
                 f"Flight {route_name}, departing {dep_date}, ${total}. "
                 "A confirmation text has been sent to the caller's phone. "
-                "Read the confirmation code using the phonetic spelling, "
-                "let them know the details have been texted, thank them, and end the call."
+                "Let them know the details have been texted, thank them, and end the call."
             )
             result.send_sms(
                 to_number=phone,
@@ -1882,6 +1921,193 @@ def print_startup_url():
     logger.info(f"SWML endpoint: {url}")
 
 
+def _parse_call_flow(call_data):
+    """Extract step changes and function calls from call log."""
+    flow = []
+    current_step = None
+    pending_functions = []
+
+    for entry in call_data.get("call_log", []):
+        role = entry.get("role")
+
+        if role == "system-log":
+            action = entry.get("action")
+
+            if action == "change_step":
+                step_name = entry.get("name", "unknown")
+
+                if current_step is None and pending_functions:
+                    prev_step = "collect_profile" if step_name in ["save_profile_step", "greeting", "get_origin"] else "START"
+                    flow.append({"type": "step_change", "from": prev_step, "to": step_name, "index": entry.get("index")})
+                    for func in pending_functions:
+                        func["step"] = prev_step
+                        flow.insert(len(flow) - 1, func)
+                    pending_functions = []
+                else:
+                    flow.append({"type": "step_change", "from": current_step or "START", "to": step_name, "index": entry.get("index")})
+
+                current_step = step_name
+
+            elif action in ["gather_submit", "call_function"]:
+                func_obj = {
+                    "type": "function_call",
+                    "step": current_step,
+                    "function": entry.get("function", action),
+                    "args": entry.get("args", "")
+                }
+                if current_step is None:
+                    pending_functions.append(func_obj)
+                else:
+                    flow.append(func_obj)
+
+    return flow
+
+
+def _generate_mermaid_flow(flow):
+    """Generate Mermaid flowchart from flow data."""
+    def sanitize_label(text):
+        text = str(text).replace('"', "'").replace('#', '').replace('&', 'and')
+        return text[:37] + "..." if len(text) > 40 else text
+
+    lines = ["graph LR"]
+    lines.append("    classDef stepNode fill:#2a2e42,stroke:#4a9eff,stroke-width:2px,color:#fff")
+    lines.append("    classDef funcNode fill:#1a1d2e,stroke:#ffa500,stroke-width:2px,color:#ffa500")
+    lines.append("    classDef gatherNode fill:#1a1d2e,stroke:#6a8fa8,stroke-width:1px,color:#8a8fa8")
+    lines.append("")
+
+    node_id = 0
+    step_nodes = {}
+    last_func_per_step = {}
+
+    # Create step nodes
+    for item in flow:
+        if item["type"] == "step_change":
+            for step in [item["from"], item["to"]]:
+                if step not in step_nodes:
+                    step_nodes[step] = f"S{node_id}"
+                    lines.append(f'    {step_nodes[step]}["{sanitize_label(step)}"]:::stepNode')
+                    node_id += 1
+
+    # Create function chains
+    for item in flow:
+        if item["type"] == "step_change":
+            lines.append(f'    {step_nodes[item["from"]]} --> {step_nodes[item["to"]]}')
+            last_func_per_step[item["to"]] = None
+
+        elif item["type"] == "function_call":
+            func_node = f"F{node_id}"
+            node_id += 1
+            step = item["step"]
+            func_name = item["function"]
+            args_str = item["args"]
+
+            label = func_name
+            style_class = "funcNode"
+
+            try:
+                args_obj = json.loads(args_str) if args_str else {}
+                if func_name == "gather_submit":
+                    label = f"gather_submit<br/>{sanitize_label(args_obj.get('answer', ''))}"
+                    style_class = "gatherNode"
+                elif func_name == "resolve_location":
+                    label = f"resolve_location<br/>{sanitize_label(args_obj.get('location_text', ''))} ({args_obj.get('location_type', '')})"
+                elif func_name == "select_trip_type":
+                    label = f"select_trip_type<br/>{args_obj.get('trip_type', '').replace('_', ' ')}"
+                elif func_name == "select_flight":
+                    label = f"select_flight<br/>Option {args_obj.get('option_number', '')}"
+            except:
+                pass
+
+            lines.append(f'    {func_node}["{label}"]:::{style_class}')
+
+            if step in last_func_per_step and last_func_per_step[step]:
+                lines.append(f'    {last_func_per_step[step]} --> {func_node}')
+            elif step in step_nodes:
+                lines.append(f'    {step_nodes[step]} -.-> {func_node}')
+
+            last_func_per_step[step] = func_node
+
+    return "\n".join(lines)
+
+
+def _generate_step_flow_diagram(ctx):
+    """Generate Mermaid diagram from context steps."""
+    def sanitize_label(text):
+        text = str(text).replace('"', "'").replace('#', '').replace('&', 'and')
+        return text[:37] + "..." if len(text) > 40 else text
+
+    lines = ["%%{init: {'flowchart': {'rankSpacing': 100, 'nodeSpacing': 50}}}%%"]
+    lines.append("flowchart LR")
+    lines.append("    classDef stepNode fill:#2a2e42,stroke:#4a9eff,stroke-width:2px,color:#fff")
+    lines.append("    classDef funcNode fill:#1a1d2e,stroke:#ffa500,stroke-width:2px,color:#ffa500")
+    lines.append("")
+
+    node_id = 0
+    step_nodes = {}
+
+    # Create main step flow first (forces horizontal layout)
+    step_chain = []
+    for step_name in ctx._step_order:
+        step_nodes[step_name] = f"S{node_id}"
+        step_chain.append(step_nodes[step_name])
+        lines.append(f'    {step_nodes[step_name]}["{sanitize_label(step_name)}"]:::stepNode')
+        node_id += 1
+
+    # Connect steps in one chain
+    chain = " --> ".join(step_chain)
+    lines.append(f'    {chain}')
+
+    # Add functions below each step
+    for step_name in ctx._step_order:
+        step = ctx.get_step(step_name)
+        functions = step._functions if hasattr(step, '_functions') else []
+
+        if functions and functions != ["none"]:
+            for func in functions:
+                func_node = f"F{node_id}"
+                node_id += 1
+                lines.append(f'    {func_node}["{sanitize_label(func)}"]:::funcNode')
+                lines.append(f'    {step_nodes[step_name]} -.-> {func_node}')
+
+    return "\n".join(lines)
+
+
+def _generate_flow_html(call_data, mermaid_code):
+    """Generate HTML page with Mermaid diagram."""
+    call_id = call_data.get("call_id", "unknown")
+    caller = call_data.get("caller_id_number", "unknown")
+
+    global_data = call_data.get("global_data", {})
+    profile = global_data.get("passenger_profile")
+    booking = global_data.get("booking_state", {}).get("booking")
+
+    summary = []
+    if profile:
+        summary.append(f"Profile: {profile.get('first_name')} {profile.get('last_name')}")
+    if booking:
+        summary.append(f"Booking: {booking.get('pnr')} - {booking.get('route')}")
+
+    summary_html = "<br>".join(summary) if summary else "No booking completed"
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Call Flow: {call_id}</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+body{{font-family:sans-serif;background:#0f1117;color:#e0e0e0;margin:0;padding:20px}}
+.header{{background:#1a1d2e;padding:20px;border-radius:8px;margin-bottom:20px}}
+.header h1{{margin:0 0 10px 0;color:#4a9eff}}
+.summary{{background:#1a1d2e;padding:15px;border-radius:8px;margin-bottom:20px;border-left:3px solid #4a9eff}}
+.diagram{{background:#1a1d2e;padding:20px;border-radius:8px;overflow-x:auto}}
+.mermaid{{display:flex;justify-content:center}}
+</style></head><body>
+<div class="header"><h1>Call Flow Visualization</h1>
+<div>Call ID: <code>{call_id}</code><br>Caller: <code>{caller}</code></div></div>
+<div class="summary"><strong>Call Summary:</strong><br>{summary_html}</div>
+<div class="diagram"><div class="mermaid">{mermaid_code}</div></div>
+<script>mermaid.initialize({{startOnLoad:true,theme:'dark',flowchart:{{curve:'basis',padding:20}}}});</script>
+</body></html>"""
+
+
 def create_server():
     """Create and configure the AgentServer."""
     server = AgentServer(host=config.HOST, port=config.PORT)
@@ -1899,6 +2125,48 @@ def create_server():
     def api_bookings():
         """Return all bookings for the dashboard."""
         return {"bookings": get_all_bookings()}
+
+    @server.app.post("/flow")
+    def view_call_flow():
+        """Generate interactive flow visualization for uploaded call data."""
+        from flask import request
+
+        call_data = request.get_json()
+        if not call_data:
+            return {"error": "No call data provided"}, 400
+
+        flow = _parse_call_flow(call_data)
+        mermaid_code = _generate_mermaid_flow(flow)
+        html = _generate_flow_html(call_data, mermaid_code)
+
+        return server.app.response_class(
+            response=html,
+            status=200,
+            mimetype='text/html'
+        )
+
+    @server.app.get("/state-flow")
+    def state_flow_diagram():
+        """Generate state flow diagram from agent configuration."""
+        agent = VoyagerAgent()
+        ctx = agent._contexts_builder.get_context("default")
+
+        mermaid_code = _generate_step_flow_diagram(ctx)
+        html = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Voyager State Flow</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+body{{font-family:sans-serif;background:#0f1117;color:#e0e0e0;margin:0;padding:20px}}
+.header{{background:#1a1d2e;padding:20px;border-radius:8px;margin-bottom:20px}}
+.header h1{{margin:0;color:#4a9eff}}
+.diagram{{background:#1a1d2e;padding:20px;border-radius:8px;overflow-x:auto}}
+</style></head><body>
+<div class="header"><h1>Voyager Agent State Flow</h1></div>
+<div class="diagram"><div class="mermaid">{mermaid_code}</div></div>
+<script>mermaid.initialize({{startOnLoad:true,theme:'dark'}});</script>
+</body></html>"""
+
+        return server.app.response_class(response=html, status=200, mimetype='text/html')
 
     # Serve static files from web/ directory
     web_dir = Path(__file__).parent / "web"
