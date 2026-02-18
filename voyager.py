@@ -176,8 +176,8 @@ class VoyagerAgent(AgentBase):
 
         # AI model
         self.set_param("ai_model", config.AI_MODEL)
-        self.set_param("thinking_model", "gpt-oss-120b@groq.ai")
-        self.set_param("enable_thinking", True)
+#        self.set_param("thinking_model", "gpt-oss-120b@groq.ai")
+#        self.set_param("enable_thinking", True)
 
         self.set_prompt_llm_params(top_p=0.9, temperature=0.3)
 
@@ -279,13 +279,13 @@ class VoyagerAgent(AgentBase):
                 save_call_state(call_id, _state)
 
             if not value:
-                return SwaigFunctionResult("No answer provided. Ask the caller again.")
+                return SwaigFunctionResult("No answer provided.")
             # Guard: reject duplicate submission (model batched calls)
             global_data = (raw_data or {}).get("global_data", {})
             existing = global_data.get(_storage_ns, {})
             if existing.get(_key_name):
                 return SwaigFunctionResult(
-                    f"Already have {_key_name.replace('_', ' ')}. Move on to the next question."
+                    f"Already have {_key_name.replace('_', ' ')}."
                 )
             if _validator:
                 error = _validator(value, raw_data)
@@ -327,18 +327,20 @@ class VoyagerAgent(AgentBase):
         ])
         get_origin.set_step_criteria("Origin airport confirmed and saved")
         get_origin.set_functions(["resolve_location"])
-        get_origin.set_valid_steps(["get_destination", "disambiguate_origin"])
+        get_origin.set_valid_steps(["get_destination", "disambiguate_origin",
+                                    "collect_trip_type", "search_and_present",
+                                    "collect_booking_roundtrip", "collect_booking_oneway"])
 
         # DISAMBIGUATE ORIGIN
         disambiguate_origin = ctx.add_step("disambiguate_origin")
         disambiguate_origin.add_section("Task", "Ask the caller to choose between multiple origin airports")
         disambiguate_origin.add_bullets("Process", [
-            "Present the airports by name and city and ask which they prefer",
-            "Call select_airport with location_type='origin' and the chosen IATA code",
-            "If the caller says 'any', call select_airport with the first candidate",
+            "Say the airport options aloud — list each by name and city before doing anything else",
+            "Wait for the caller to respond before doing anything else",
+            "Only after the caller answers, call select_airport with location_type='origin' and the IATA code they chose",
+            "If the caller says 'any' or 'doesn't matter', call select_airport with the first candidate",
         ])
-        # select_airport is the only available function; valid_steps enforces transitions
-        disambiguate_origin.set_step_criteria("Origin airport stored via select_airport")
+        disambiguate_origin.set_step_criteria("Caller verbally chose an airport and select_airport was called")
         disambiguate_origin.set_functions(["select_airport"])
         disambiguate_origin.set_valid_steps(["get_destination"])
 
@@ -357,26 +359,41 @@ class VoyagerAgent(AgentBase):
         disambiguate_destination = ctx.add_step("disambiguate_destination")
         disambiguate_destination.add_section("Task", "Ask the caller to choose between multiple destination airports")
         disambiguate_destination.add_bullets("Process", [
-            "Present the airports by name and ask which they prefer",
-            "Call select_airport with location_type='destination' and the chosen IATA code",
-            "If the caller says 'any', call select_airport with the first candidate",
+            "Say the airport options aloud — list each by name and city (e.g. 'I found three airports near Miami: Miami International, Fort Lauderdale-Hollywood, and Palm Beach International — which would you like?')",
+            "Wait for the caller to respond before doing anything else",
+            "Only after the caller answers, call select_airport with location_type='destination' and the IATA code they chose",
+            "If the caller says 'any' or 'doesn't matter', call select_airport with the first candidate",
         ])
-        # select_airport is the only available function; valid_steps enforces transitions
-        disambiguate_destination.set_step_criteria("Destination airport stored via select_airport")
+        disambiguate_destination.set_step_criteria("Caller verbally chose an airport and select_airport was called")
         disambiguate_destination.set_functions(["select_airport"])
         disambiguate_destination.set_valid_steps(["collect_trip_type"])
 
-        # COLLECT TRIP TYPE (simple branch point)
-        collect_trip_type = ctx.add_step("collect_trip_type")
-        collect_trip_type.add_section("Task", "Ask whether this is a round-trip or one-way flight")
-        collect_trip_type.add_bullets("Process", [
-            "Ask the caller: 'Is this a round-trip or one-way?'",
-            "Read back their answer and ask them to confirm it is correct",
-            "Call select_trip_type with trip_type 'round_trip' or 'one_way' and their confirmation",
+        # COLLECT TRIP TYPE — gather_info, single question; no tools available so no spurious calls
+        ctx.add_step("collect_trip_type") \
+            .set_text("Ask whether this is a round-trip or one-way flight.") \
+            .set_functions("none") \
+            .set_gather_info(
+                output_key="trip_type_answers",
+                completion_action="next_step",
+                prompt="Ask the caller if this is a round-trip or one-way flight."
+            ) \
+            .add_gather_question(
+                "trip_type",
+                "Is this a round trip or one-way?",
+                confirm=True,
+                prompt="Submit exactly 'round_trip' or 'one_way'."
+            ) \
+            .set_valid_steps(["apply_trip_type"])
+
+        # APPLY TRIP TYPE — bridge step; AI calls select_trip_type immediately (desired, gather already confirmed)
+        apply_trip_type = ctx.add_step("apply_trip_type")
+        apply_trip_type.add_section("Task", "Record the trip type and route to booking")
+        apply_trip_type.add_bullets("Process", [
+            "The caller already answered via gather — call select_trip_type immediately with no arguments",
         ])
-        collect_trip_type.set_step_criteria("Trip type confirmed and submitted via select_trip_type")
-        collect_trip_type.set_functions(["select_trip_type"])
-        collect_trip_type.set_valid_steps(["collect_booking"])
+        apply_trip_type.set_step_criteria("Trip type recorded via select_trip_type")
+        apply_trip_type.set_functions(["select_trip_type"])
+        apply_trip_type.set_valid_steps(["collect_booking_roundtrip", "collect_booking_oneway"])
 
         # SEARCH FLIGHTS
         search_flights_step = ctx.add_step("search_flights")
@@ -401,7 +418,7 @@ class VoyagerAgent(AgentBase):
         ])
         present_options.set_step_criteria("Caller selects an option via select_flight or requests new search via restart_search")
         present_options.set_functions(["select_flight", "restart_search"])
-        present_options.set_valid_steps(["confirm_price", "collect_booking", "get_origin"])
+        present_options.set_valid_steps(["confirm_price", "collect_booking_roundtrip", "collect_booking_oneway", "get_origin"])
 
         # CONFIRM PRICE
         confirm_price = ctx.add_step("confirm_price")
@@ -424,7 +441,7 @@ class VoyagerAgent(AgentBase):
         # book_flight takes no parameters — profile data is read automatically
         create_booking.set_step_criteria("Booking created, PNR read back, call ending")
         create_booking.set_functions(["book_flight"])
-        create_booking.set_valid_steps(["wrap_up", "error_recovery"])
+        create_booking.set_valid_steps(["wrap_up", "error_recovery", "collect_profile"])
 
         # ERROR RECOVERY
         error_recovery = ctx.add_step("error_recovery")
@@ -437,12 +454,14 @@ class VoyagerAgent(AgentBase):
         ])
         error_recovery.set_step_criteria("Recovery action taken")
         error_recovery.set_functions(["search_flights", "restart_booking", "restart_search"])
-        error_recovery.set_valid_steps(["present_options", "collect_booking", "get_origin"])
+        error_recovery.set_valid_steps(["present_options", "collect_booking_roundtrip", "collect_booking_oneway", "get_origin"])
 
         # WRAP UP
         wrap_up = ctx.add_step("wrap_up")
-        wrap_up.add_section("Task", "End the call")
+        wrap_up.add_section("Task", "Confirm booking details and end the call")
         wrap_up.add_bullets("Process", [
+            "Read back the confirmed flight details: airline, departure time, arrival time, and the PNR (phonetic spelling is provided — read it exactly as given)",
+            "Tell the caller an SMS confirmation has been sent to their phone",
             "Say a brief, warm goodbye: 'Thanks for flying with Voyager — have an amazing trip!'",
             "End the call",
         ])
@@ -457,6 +476,7 @@ class VoyagerAgent(AgentBase):
 
         ctx.add_step("collect_profile") \
             .set_text("Welcome the caller, then collect their profile.") \
+            .set_functions("none") \
             .set_gather_info(
                 output_key="profile_answers",
                 completion_action="next_step",
@@ -506,7 +526,7 @@ class VoyagerAgent(AgentBase):
                 "Profile data is in ${profile_answers}"
             ]) \
             .set_functions(["save_profile"]) \
-            .set_valid_steps(["get_origin"])
+            .set_valid_steps(["get_origin", "collect_profile"])
 
         @self.tool(name="save_profile",
                    description="Save profile and create passenger",
@@ -592,11 +612,10 @@ class VoyagerAgent(AgentBase):
 
             save_call_state(call_id, state)
 
-            msg = f"Profile saved for {answers.get('first_name', '')} {answers.get('last_name', '')}."
-            if home_airport_iata and state.get("origin"):
-                msg += f" Home airport {home_airport_full_name} is set as departure airport."
-
-            result = SwaigFunctionResult(msg)
+            first_n = answers.get("first_name", "")
+            last_n = answers.get("last_name", "")
+            home_note = f" Home airport: {home_airport_full_name} ({home_airport_iata})." if home_airport_iata and state.get("origin") else ""
+            result = SwaigFunctionResult(f"Profile saved.\nPassenger: {first_n} {last_n}.{home_note}")
             result.update_global_data({
                 "passenger_profile": profile,
                 "is_new_caller": False,
@@ -604,14 +623,16 @@ class VoyagerAgent(AgentBase):
             result.swml_change_step("get_origin")
             return result
 
-        # ── Booking Collection (gather_info mode) ──
+        # ── Booking Collection (gather_info mode, two paths) ──
 
-        ctx.add_step("collect_booking") \
-            .set_text("Search for flights.") \
+        # ROUND-TRIP: includes return date question
+        ctx.add_step("collect_booking_roundtrip") \
+            .set_text("Collect round-trip booking details.") \
+            .set_functions("none") \
             .set_gather_info(
                 output_key="booking_answers",
                 completion_action="next_step",
-                prompt="Now let's plan your trip, ${global_data.passenger_profile.first_name}."
+                prompt="Now let's plan your round trip, ${global_data.passenger_profile.first_name}."
             ) \
             .add_gather_question(
                 "departure_date",
@@ -623,9 +644,35 @@ class VoyagerAgent(AgentBase):
                 "return_date",
                 "When would you like to return?",
                 confirm=True,
-                prompt="Check ${booking_state.trip_type}. If it is 'one_way', submit 'ONEWAY' immediately without asking the caller. "
-                       "Only ask 'When would you like to return?' if the trip type is 'round_trip'. "
-                       "Accept natural language but submit in YYYY-MM-DD format. Must be after departure date."
+                prompt="Accept natural language but submit in YYYY-MM-DD format. Must be after departure date."
+            ) \
+            .add_gather_question(
+                "adults",
+                "How many passengers?",
+                type="integer",
+                prompt="Must be 1-8 passengers"
+            ) \
+            .add_gather_question(
+                "cabin_class",
+                "What cabin class would you like — you usually fly ${global_data.passenger_profile.cabin_preference}?",
+                prompt="Options: ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST."
+            ) \
+            .set_valid_steps(["search_and_present"])
+
+        # ONE-WAY: no return date question
+        ctx.add_step("collect_booking_oneway") \
+            .set_text("Collect one-way booking details.") \
+            .set_functions("none") \
+            .set_gather_info(
+                output_key="booking_answers",
+                completion_action="next_step",
+                prompt="Now let's plan your trip, ${global_data.passenger_profile.first_name}."
+            ) \
+            .add_gather_question(
+                "departure_date",
+                "When would you like to depart?",
+                confirm=True,
+                prompt="Accept natural language but submit in YYYY-MM-DD format. Must be a future date."
             ) \
             .add_gather_question(
                 "adults",
@@ -751,6 +798,10 @@ class VoyagerAgent(AgentBase):
             result.update_global_data({"booking_state": build_ai_summary(state)})
             return result
 
+        def _booking_step(state):
+            """Return the correct booking gather step name based on trip type."""
+            return "collect_booking_roundtrip" if state.get("trip_type") == "round_trip" else "collect_booking_oneway"
+
         # --- Google Maps helpers for geocoding ---
         def geocode_location(location_text):
             """Use Google Geocoding API to get coordinates for a location."""
@@ -819,13 +870,16 @@ class VoyagerAgent(AgentBase):
             logger.info(f"resolve_location: text='{location_text}', type='{location_type}', mode='{mode}'")
 
             if not location_text:
-                return SwaigFunctionResult(
-                    "No location provided. Ask the caller for a city or airport name "
-                    "and call resolve_location again with their answer."
-                )
+                return SwaigFunctionResult("No location text provided.")
 
             call_id = _call_id(raw_data)
             state = load_call_state(call_id)
+
+            # Guard: destination cannot be resolved before origin is set
+            if location_type == "destination" and not state.get("origin") and mode != "verify":
+                return SwaigFunctionResult(
+                    "Origin airport must be set before destination.\nAsk the caller where they're flying from first."
+                )
 
             # Step 1: Google Geocoding for coordinates
             geo = geocode_location(location_text)
@@ -883,10 +937,7 @@ class VoyagerAgent(AgentBase):
                     }
 
             if not candidates:
-                return SwaigFunctionResult(
-                    f"I couldn't find airports near '{location_text}'. "
-                    "Ask the caller to try a different city name or be more specific."
-                )
+                return SwaigFunctionResult(f"No airports found for '{location_text}'.")
 
             # Sort by score descending
             ranked = sorted(candidates.values(), key=lambda x: x["score"], reverse=True)
@@ -923,14 +974,21 @@ class VoyagerAgent(AgentBase):
                 logger.info(f"resolve_location: set state['{location_type}'] = {top['iata']}")
 
                 result = SwaigFunctionResult(
-                    f"The closest major airport is {top['name']} ({top['iata']})"
-                    f"{' in ' + top['city'] if top['city'] else ''}. "
-                    f"Tell the caller and ask if that's correct before proceeding."
+                    f"Airport resolved.\n"
+                    f"{top['name']} ({top['iata']}){', ' + top['city'] if top['city'] else ''}."
                 )
                 result.add_dynamic_hints([h for h in [top["name"], top["city"]] if h])
                 save_call_state(call_id, state)
                 _sync_summary(result, state)
-                # DON'T force step change - let AI confirm with caller first
+                # Mid-flow rejoin: if origin just resolved and destination already set,
+                # skip asking destination again and jump to the right point in the flow.
+                if location_type == "origin" and state.get("destination"):
+                    if state.get("departure_date"):
+                        _change_step(result, "search_and_present")
+                    elif state.get("trip_type"):
+                        _change_step(result, _booking_step(state))
+                    else:
+                        _change_step(result, "collect_trip_type")
                 return result
             else:
                 # Multiple airports — need disambiguation
@@ -940,9 +998,7 @@ class VoyagerAgent(AgentBase):
                 )
 
                 if mode == "verify":
-                    return SwaigFunctionResult(
-                        f"Multiple airports: {airport_list}. Ask which one they mean."
-                    )
+                    return SwaigFunctionResult(f"Multiple airports found.\n{airport_list}")
 
                 # Store candidates for disambiguation step
                 state[f"{location_type}_candidates"] = [
@@ -954,10 +1010,7 @@ class VoyagerAgent(AgentBase):
                 logger.info(f"resolve_location: {len(top_3)} candidates for {location_type}")
 
                 disambig_step = f"disambiguate_{location_type}"
-                result = SwaigFunctionResult(
-                    f"Found multiple airports: {airport_list}. "
-                    "Ask the caller which they prefer."
-                )
+                result = SwaigFunctionResult(f"Multiple airports found.\n{airport_list}")
                 hints = []
                 for a in top_3:
                     hints.append(a["name"])
@@ -1014,8 +1067,7 @@ class VoyagerAgent(AgentBase):
             if not selected:
                 available = ", ".join(f"{c['name']} ({c['iata']})" for c in candidates)
                 return SwaigFunctionResult(
-                    f"{iata_code} is not in the candidates. Available: {available}. "
-                    "Ask the caller to choose from these."
+                    f"{iata_code} not in candidate list.\nAvailable: {available}"
                 )
 
             # Store selected airport — prefer city geo saved during resolve_location,
@@ -1049,56 +1101,33 @@ class VoyagerAgent(AgentBase):
         # 3. SELECT TRIP TYPE
         @self.tool(
             name="select_trip_type",
-            description="Record whether this is a round-trip or one-way flight.",
+            description="Record the trip type from gather and route to booking. Call immediately with no arguments.",
             wait_file="/sounds/typing.mp3",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "trip_type": {
-                        "type": "string",
-                        "description": "round_trip or one_way",
-                        "enum": ["round_trip", "one_way"],
-                    },
-                    "confirmed": {
-                        "type": "boolean",
-                        "description": "Set true only after the caller explicitly confirmed",
-                    },
-                },
-                "required": ["trip_type"],
-            },
+            parameters={"type": "object", "properties": {}, "required": []},
         )
         def select_trip_type(args, raw_data):
-            trip_type = args["trip_type"]
-            confirmed = args.get("confirmed", False)
+            global_data = (raw_data or {}).get("global_data", {})
+            raw_trip_type = global_data.get("trip_type_answers", {}).get("trip_type", "").lower().strip()
+
+            # Normalize common variations
+            if raw_trip_type in ("round_trip", "roundtrip", "round trip", "round-trip"):
+                trip_type = "round_trip"
+            elif raw_trip_type in ("one_way", "oneway", "one way", "one-way"):
+                trip_type = "one_way"
+            else:
+                result = SwaigFunctionResult(
+                    f"Unrecognized trip type '{raw_trip_type}'.\nExpected round_trip or one_way."
+                )
+                _change_step(result, "collect_trip_type")
+                return result
 
             call_id = _call_id(raw_data)
             state = load_call_state(call_id)
-
-            # Server-side guard: first call ALWAYS bounces regardless of parameters.
-            # The model can't bypass this by sending confirmed=true on the first call.
-            if not state.get("_trip_type_asked"):
-                state["_trip_type_asked"] = True
-                save_call_state(call_id, state)
-                return SwaigFunctionResult(
-                    "Ask the caller: 'Is this a round-trip or one-way flight?' "
-                    "Wait for their answer, then call select_trip_type with their choice "
-                    "and confirmed set to true."
-                )
-
-            if not confirmed:
-                label = trip_type.replace("_", " ")
-                return SwaigFunctionResult(
-                    f"Read back '{label}' to the caller and ask if that's correct. "
-                    f"Then call select_trip_type again with confirmed set to true."
-                )
-
-            # Commit — clear the asked flag for potential re-entry
-            state.pop("_trip_type_asked", None)
             state["trip_type"] = trip_type
             save_call_state(call_id, state)
 
-            next_step = "collect_booking"
-            result = SwaigFunctionResult(f"Got it — {trip_type.replace('_', ' ')}.")
+            next_step = "collect_booking_roundtrip" if trip_type == "round_trip" else "collect_booking_oneway"
+            result = SwaigFunctionResult(f"Trip type set.\n{trip_type.replace('_', ' ')}.")
             _sync_summary(result, state)
             _change_step(result, next_step)
             return result
@@ -1129,7 +1158,9 @@ class VoyagerAgent(AgentBase):
             first_name = (fields.get("first_name") or "").strip()
             last_name = (fields.get("last_name") or "").strip()
             if not first_name or not last_name:
-                return SwaigFunctionResult("Missing name. Cannot save profile.")
+                result = SwaigFunctionResult("Missing name. Cannot save profile.")
+                _change_step(result, "collect_profile")
+                return result
 
             # Extract home airport IATA — try "(SFO)" format, then bare 3-letter code
             home_airport_name = fields.get("home_airport_name") or ""
@@ -1170,15 +1201,11 @@ class VoyagerAgent(AgentBase):
             # state["origin"] to avoid stale data if caller declines
             if home_airport_iata and home_airport_name:
                 result = SwaigFunctionResult(
-                    f"Profile saved for {first_name} {last_name}. "
-                    f"Their home airport is {home_airport_name} ({home_airport_iata}). "
-                    f"Ask the caller: 'Would you like to fly from {home_airport_name} today, or somewhere else?' "
-                    f"If they confirm, call resolve_location with '{home_airport_name}' and location_type='origin'. "
-                    "If they want a different airport, ask where and call resolve_location with their answer."
+                    f"Profile saved.\nPassenger: {first_name} {last_name}. Home airport: {home_airport_name} ({home_airport_iata})."
                 )
             else:
                 result = SwaigFunctionResult(
-                    f"Profile saved for {first_name} {last_name}. Now ask where they'd like to fly."
+                    f"Profile saved.\nPassenger: {first_name} {last_name}. No home airport on file."
                 )
 
             result.update_global_data(global_update)
@@ -1217,19 +1244,17 @@ class VoyagerAgent(AgentBase):
                 departure_dt = date.fromisoformat(departure_str)
             except (ValueError, TypeError):
                 result = SwaigFunctionResult(
-                    f"Invalid departure date '{departure_str}'. "
-                    "Must be in YYYY-MM-DD format. Ask the caller again."
+                    f"Invalid departure date.\nDate '{departure_str}' is not in YYYY-MM-DD format."
                 )
                 _sync_summary(result, state)
-                _change_step(result, "collect_booking")
+                _change_step(result, _booking_step(state))
                 return result
             if departure_dt < date.today():
                 result = SwaigFunctionResult(
-                    f"The departure date {departure_str} is in the past. "
-                    "Ask the caller for a future departure date."
+                    f"Departure date is in the past.\nDate: {departure_str}."
                 )
                 _sync_summary(result, state)
-                _change_step(result, "collect_booking")
+                _change_step(result, _booking_step(state))
                 return result
             state["departure_date"] = departure_str
 
@@ -1240,27 +1265,24 @@ class VoyagerAgent(AgentBase):
                     return_dt = date.fromisoformat(return_str)
                 except (ValueError, TypeError):
                     result = SwaigFunctionResult(
-                        f"Invalid return date '{return_str}'. "
-                        "Must be in YYYY-MM-DD format. Ask the caller again."
+                        f"Invalid return date.\nDate '{return_str}' is not in YYYY-MM-DD format."
                     )
                     _sync_summary(result, state)
-                    _change_step(result, "collect_booking")
+                    _change_step(result, _booking_step(state))
                     return result
                 if return_dt < date.today():
                     result = SwaigFunctionResult(
-                        f"The return date {return_str} is in the past. "
-                        "Ask the caller for a future return date."
+                        f"Return date is in the past.\nDate: {return_str}."
                     )
                     _sync_summary(result, state)
-                    _change_step(result, "collect_booking")
+                    _change_step(result, _booking_step(state))
                     return result
                 if return_dt <= departure_dt:
                     result = SwaigFunctionResult(
-                        f"The return date {return_str} must be after the departure date {departure_str}. "
-                        "Ask the caller for the correct return date."
+                        f"Return date must be after departure date.\nReturn: {return_str}. Departure: {departure_str}."
                     )
                     _sync_summary(result, state)
-                    _change_step(result, "collect_booking")
+                    _change_step(result, _booking_step(state))
                     return result
                 state["return_date"] = return_str
 
@@ -1270,9 +1292,7 @@ class VoyagerAgent(AgentBase):
                 adults = 1
             if adults > 8:
                 result = SwaigFunctionResult(
-                    f"We can only book up to 8 passengers at a time. "
-                    f"The caller requested {adults}. Let them know they'll need to "
-                    "contact a travel agent for parties larger than 8."
+                    f"Too many passengers.\nRequested: {adults}. Maximum: 8. Parties larger than 8 require a travel agent."
                 )
                 _sync_summary(result, state)
                 _change_step(result, "error_recovery")
@@ -1295,9 +1315,7 @@ class VoyagerAgent(AgentBase):
             departure_date = state.get("departure_date")
 
             if not origin:
-                result = SwaigFunctionResult(
-                    "No origin airport set. Need to resolve the departure city first."
-                )
+                result = SwaigFunctionResult("Origin airport not set.")
                 _change_step(result, "get_origin")
                 return result
 
@@ -1305,20 +1323,16 @@ class VoyagerAgent(AgentBase):
                 candidates = state.get("destination_candidates")
                 if candidates:
                     result = SwaigFunctionResult(
-                        "Destination airport not selected yet. The caller needs to pick from the candidates."
+                        "Destination airport not selected. Multiple candidates available."
                     )
                     _change_step(result, "disambiguate_destination")
                 else:
-                    result = SwaigFunctionResult(
-                        "No destination airport set. Need to resolve the destination city first."
-                    )
+                    result = SwaigFunctionResult("Destination airport not set.")
                     _change_step(result, "get_destination")
                 return result
 
             if not departure_date:
-                result = SwaigFunctionResult(
-                    "No travel dates set. Need to collect dates from the caller first."
-                )
+                result = SwaigFunctionResult("Travel dates not set.")
                 _change_step(result, "collect_trip_type")
                 return result
 
@@ -1343,8 +1357,7 @@ class VoyagerAgent(AgentBase):
 
             if not offers:
                 result = SwaigFunctionResult(
-                    f"No flights found from {origin_iata} to {dest_iata} on {departure_date}. "
-                    "Ask the caller if they'd like to try different dates or a nearby airport."
+                    f"No flights found.\nRoute: {origin_iata} to {dest_iata} on {departure_date}."
                 )
                 _change_step(result, "error_recovery")
                 return result
@@ -1352,9 +1365,8 @@ class VoyagerAgent(AgentBase):
             cabin_note = ""
             if actual_cabin != cabin:
                 cabin_note = (
-                    f"Note: {cabin.lower().replace('_', ' ')} was not available on this route, "
-                    f"showing {actual_cabin.lower().replace('_', ' ')} results instead. "
-                    "Let the caller know. "
+                    f"Cabin downgrade: {cabin.lower().replace('_', ' ')} unavailable, "
+                    f"showing {actual_cabin.lower().replace('_', ' ')}.\n"
                 )
                 state["cabin_class"] = actual_cabin
 
@@ -1368,10 +1380,7 @@ class VoyagerAgent(AgentBase):
             summary_text = " | ".join(summaries)
             count = len(offers)
             result = SwaigFunctionResult(
-                f"{cabin_note}"
-                f"I found {count} option{'s' if count > 1 else ''}. {summary_text}. "
-                "Read ALL options to the caller, then ask which one they prefer. "
-                "When they choose, call select_flight with the option number (1, 2, or 3)."
+                f"{cabin_note}Flights found.\n{count} option{'s' if count > 1 else ''}: {summary_text}."
             )
             save_call_state(call_id, state)
             _sync_summary(result, state)
@@ -1449,9 +1458,7 @@ class VoyagerAgent(AgentBase):
             flight_summaries = state.get("flight_summaries") or []
 
             if not flight_offers:
-                result = SwaigFunctionResult(
-                    "No flight options available. Need to search for flights first."
-                )
+                result = SwaigFunctionResult("No flight options on file.")
                 _change_step(result,"search_flights")
                 return result
 
@@ -1459,8 +1466,7 @@ class VoyagerAgent(AgentBase):
             if idx < 0 or idx >= len(flight_offers):
                 available = ", ".join(str(i + 1) for i in range(len(flight_offers)))
                 return SwaigFunctionResult(
-                    f"Invalid option {option_number}. Available options: {available}. "
-                    "Ask the caller which option they prefer."
+                    f"Invalid selection.\nChosen: {option_number}. Valid options: {available}."
                 )
 
             state["flight_offer"] = flight_offers[idx]
@@ -1470,10 +1476,7 @@ class VoyagerAgent(AgentBase):
                         f"offer id={selected.get('id') if isinstance(selected, dict) else 'N/A'}, "
                         f"keys={sorted(selected.keys()) if isinstance(selected, dict) else 'N/A'}")
 
-            result = SwaigFunctionResult(
-                f"Option {option_number} selected. "
-                "Now confirm the price — move to confirm_price step."
-            )
+            result = SwaigFunctionResult(f"Flight selected.\nOption {option_number}.")
             save_call_state(call_id, state)
             _sync_summary(result, state)
             _change_step(result,"confirm_price")
@@ -1507,16 +1510,11 @@ class VoyagerAgent(AgentBase):
             save_call_state(call_id, state)
 
             if reason == "different_route":
-                result = SwaigFunctionResult(
-                    "Let the caller know we'll start over with a new route."
-                )
+                result = SwaigFunctionResult("Restarting — new route.")
                 _change_step(result, "get_origin")
             else:
-                result = SwaigFunctionResult(
-                    "Let the caller know we'll collect new travel dates. "
-                    "The trip type is already set — go straight to dates."
-                )
-                _change_step(result, "collect_booking")
+                result = SwaigFunctionResult("Restarting — new dates. Trip type preserved.")
+                _change_step(result, _booking_step(state))
             return result
 
         # 5c. RESTART BOOKING (caller wants different dates from error_recovery)
@@ -1533,11 +1531,8 @@ class VoyagerAgent(AgentBase):
                          "_trip_type_asked"]:
                 state.pop(flag, None)
             save_call_state(call_id, state)
-            result = SwaigFunctionResult(
-                "Let the caller know we'll collect new travel dates. "
-                "The trip type is already set — go straight to dates."
-            )
-            _change_step(result, "collect_booking")
+            result = SwaigFunctionResult("Restarting booking — new dates. Trip type preserved.")
+            _change_step(result, _booking_step(state))
             return result
 
         # 6. GET FLIGHT PRICE
@@ -1557,9 +1552,7 @@ class VoyagerAgent(AgentBase):
             offer = state.get("flight_offer")
 
             if not offer:
-                result = SwaigFunctionResult(
-                    "No flight search results on file. Need to search for flights first."
-                )
+                result = SwaigFunctionResult("No flight selected.")
                 _change_step(result,"search_flights")
                 return result
 
@@ -1569,10 +1562,7 @@ class VoyagerAgent(AgentBase):
             po = (pd or {}).get("flightOffers", [])
 
             if not po:
-                result = SwaigFunctionResult(
-                    "Could not confirm the price. "
-                    "Ask the caller if they'd like to search again or try different dates."
-                )
+                result = SwaigFunctionResult("Price confirmation failed.")
                 _change_step(result,"error_recovery")
                 return result
 
@@ -1588,10 +1578,7 @@ class VoyagerAgent(AgentBase):
             logger.info(f"get_flight_price: confirmed ${total} {currency}")
 
             result = SwaigFunctionResult(
-                f"The confirmed price is ${total} {currency} per person including taxes. "
-                f"{baggage_info}"
-                "Tell the caller the price and ask: 'Shall I go ahead and book this?' "
-                "If they say yes, call confirm_booking. If they say no, call decline_booking."
+                f"Price confirmed.\n${total} {currency} per person including taxes. {baggage_info}"
             )
             save_call_state(call_id, state)
             _sync_summary(result, state)
@@ -1605,7 +1592,7 @@ class VoyagerAgent(AgentBase):
             parameters={"type": "object", "properties": {}, "required": []},
         )
         def confirm_booking(args, raw_data):
-            result = SwaigFunctionResult("Proceeding to book the flight.")
+            result = SwaigFunctionResult("Booking confirmed by caller.")
             _change_step(result, "create_booking")
             return result
 
@@ -1617,9 +1604,7 @@ class VoyagerAgent(AgentBase):
             parameters={"type": "object", "properties": {}, "required": []},
         )
         def decline_booking(args, raw_data):
-            result = SwaigFunctionResult(
-                "No problem. Let the caller know we'll go back to the flight options."
-            )
+            result = SwaigFunctionResult("Booking declined.")
             _change_step(result, "present_options")
             return result
 
@@ -1660,10 +1645,9 @@ class VoyagerAgent(AgentBase):
                 missing.append("phone")
             if missing:
                 result = SwaigFunctionResult(
-                    f"Missing passenger details: {' and '.join(missing)}. "
-                    "Cannot book without a complete profile."
+                    f"Cannot book — missing passenger details.\nMissing: {', '.join(missing)}."
                 )
-                _change_step(result, "error_recovery")
+                _change_step(result, "collect_profile")
                 return result
 
             call_id = _call_id(raw_data)
@@ -1677,9 +1661,7 @@ class VoyagerAgent(AgentBase):
 
             # Guard: no origin
             if not state.get("origin"):
-                result = SwaigFunctionResult(
-                    "No origin airport set. Need to resolve the departure city first."
-                )
+                result = SwaigFunctionResult("Origin airport not set.")
                 _change_step(result,"get_origin")
                 return result
 
@@ -1688,21 +1670,17 @@ class VoyagerAgent(AgentBase):
                 candidates = state.get("destination_candidates")
                 if candidates:
                     result = SwaigFunctionResult(
-                        "Destination airport not selected yet. The caller needs to pick from the candidates."
+                        "Destination airport not selected. Multiple candidates available."
                     )
                     _change_step(result,"disambiguate_destination")
                 else:
-                    result = SwaigFunctionResult(
-                        "No destination airport set. Need to collect the destination first."
-                    )
+                    result = SwaigFunctionResult("Destination airport not set.")
                     _change_step(result,"get_destination")
                 return result
 
             # Guard: no confirmed price → back to pricing
             if not priced_offer:
-                result = SwaigFunctionResult(
-                    "No confirmed price on file. Need to confirm the fare first."
-                )
+                result = SwaigFunctionResult("No confirmed price on file.")
                 _change_step(result,"confirm_price")
                 return result
 
@@ -1738,9 +1716,7 @@ class VoyagerAgent(AgentBase):
 
             if not order:
                 result = SwaigFunctionResult(
-                    "The booking failed — this flight isn't available right now. "
-                    "All passenger details are still on file — do NOT re-ask for name, email, or phone. "
-                    "Ask the caller if they'd like to try a different flight or different dates."
+                    "Booking failed — flight unavailable.\nPassenger details retained. Do not re-ask for personal info."
                 )
                 _sync_summary(result, state)
                 _change_step(result,"error_recovery")
@@ -1811,11 +1787,12 @@ class VoyagerAgent(AgentBase):
                 f"Thank you for using Voyager!"
             )
 
+            flight_summary = state.get("flight_summary", "")
             result = SwaigFunctionResult(
-                f"Booked! Confirmation code is {pnr} — that's {phonetic}. "
-                f"Flight {route_name}, departing {dep_date}, ${total}. "
-                "A confirmation text has been sent to the caller's phone. "
-                "Let them know the details have been texted, thank them, and end the call."
+                f"Booking confirmed.\nPNR: {pnr} ({phonetic}). Route: {route_name}. "
+                f"Departure: {dep_date}. Total: ${total}. "
+                f"{('Flight: ' + flight_summary + '. ') if flight_summary else ''}"
+                f"SMS confirmation sent."
             )
             result.send_sms(
                 to_number=phone,
@@ -1922,8 +1899,66 @@ def print_startup_url():
 
 
 def _parse_call_flow(call_data):
-    """Extract step changes and function calls from call log."""
+    """Extract step changes, function calls, and gather events from call log.
+
+    Prefers call_timeline (new enriched format) when present, falls back to
+    walking call_log with support for both old and new field names.
+    Args for function nodes come from swaig_log (queue per command_name).
+    """
     flow = []
+
+    # Build swaig_log args queue by command_name (in order, skip native calls)
+    swaig_args_queue = {}
+    for entry in call_data.get("swaig_log", []):
+        name = entry.get("command_name")
+        if name and not entry.get("native"):
+            swaig_args_queue.setdefault(name, []).append(entry.get("command_arg", ""))
+
+    def pop_args(func_name):
+        queue = swaig_args_queue.get(func_name, [])
+        return queue.pop(0) if queue else ""
+
+    # Fast path: use call_timeline if present (new enriched format)
+    if "call_timeline" in call_data:
+        current_step = None
+        for event in call_data["call_timeline"]:
+            etype = event.get("type")
+
+            if etype == "step_change":
+                from_step = event.get("from_step") or "START"
+                to_step = event.get("to_step", "unknown")
+                flow.append({"type": "step_change", "from": from_step, "to": to_step})
+                current_step = to_step
+
+            elif etype == "function_call" and not event.get("native"):
+                func_name = event.get("function", "unknown")
+                flow.append({
+                    "type": "function_call",
+                    "step": current_step or event.get("step", "unknown"),
+                    "function": func_name,
+                    "args": pop_args(func_name),
+                })
+
+            elif etype == "gather_question":
+                flow.append({
+                    "type": "gather_question",
+                    "step": current_step or event.get("step"),
+                    "key": event.get("key"),
+                    "question_index": event.get("question_index", 0),
+                })
+
+            elif etype == "gather_answer":
+                flow.append({
+                    "type": "gather_answer",
+                    "step": current_step or event.get("step"),
+                    "key": event.get("key"),
+                    "question_index": event.get("question_index", 0),
+                    "confirmed": event.get("confirmed", False),
+                })
+
+        return flow
+
+    # Fallback: walk call_log (supports old and new field names)
     current_step = None
     pending_functions = []
 
@@ -1932,28 +1967,31 @@ def _parse_call_flow(call_data):
 
         if role == "system-log":
             action = entry.get("action")
+            metadata = entry.get("metadata", {})
 
-            if action == "change_step":
-                step_name = entry.get("name", "unknown")
+            if action in ("change_step", "step_change"):
+                # New format: metadata.to_step; old format: entry.name
+                step_name = metadata.get("to_step") or entry.get("name", "unknown")
 
                 if current_step is None and pending_functions:
-                    prev_step = "collect_profile" if step_name in ["save_profile_step", "greeting", "get_origin"] else "START"
-                    flow.append({"type": "step_change", "from": prev_step, "to": step_name, "index": entry.get("index")})
+                    flow.append({"type": "step_change", "from": "START", "to": step_name})
                     for func in pending_functions:
-                        func["step"] = prev_step
+                        func["step"] = "START"
                         flow.insert(len(flow) - 1, func)
                     pending_functions = []
                 else:
-                    flow.append({"type": "step_change", "from": current_step or "START", "to": step_name, "index": entry.get("index")})
+                    flow.append({"type": "step_change", "from": current_step or "START", "to": step_name})
 
                 current_step = step_name
 
-            elif action in ["gather_submit", "call_function"]:
+            elif action in ("gather_submit", "call_function", "function_call"):
+                # New format: metadata.function; old format: entry.function
+                func_name = metadata.get("function") or entry.get("function", action)
                 func_obj = {
                     "type": "function_call",
                     "step": current_step,
-                    "function": entry.get("function", action),
-                    "args": entry.get("args", "")
+                    "function": func_name,
+                    "args": pop_args(func_name),
                 }
                 if current_step is None:
                     pending_functions.append(func_obj)
@@ -1972,7 +2010,8 @@ def _generate_mermaid_flow(flow):
     lines = ["graph LR"]
     lines.append("    classDef stepNode fill:#2a2e42,stroke:#4a9eff,stroke-width:2px,color:#fff")
     lines.append("    classDef funcNode fill:#1a1d2e,stroke:#ffa500,stroke-width:2px,color:#ffa500")
-    lines.append("    classDef gatherNode fill:#1a1d2e,stroke:#6a8fa8,stroke-width:1px,color:#8a8fa8")
+    lines.append("    classDef gatherQNode fill:#0d1117,stroke:#4a9eff,stroke-width:1px,stroke-dasharray:4,color:#6a9eff")
+    lines.append("    classDef gatherANode fill:#0d1117,stroke:#4a9e6a,stroke-width:1px,stroke-dasharray:4,color:#4a9e6a")
     lines.append("")
 
     node_id = 0
@@ -1988,7 +2027,7 @@ def _generate_mermaid_flow(flow):
                     lines.append(f'    {step_nodes[step]}["{sanitize_label(step)}"]:::stepNode')
                     node_id += 1
 
-    # Create function chains
+    # Create function chains and gather nodes
     for item in flow:
         if item["type"] == "step_change":
             lines.append(f'    {step_nodes[item["from"]]} --> {step_nodes[item["to"]]}')
@@ -1999,26 +2038,30 @@ def _generate_mermaid_flow(flow):
             node_id += 1
             step = item["step"]
             func_name = item["function"]
-            args_str = item["args"]
+            args_str = item.get("args", "")
 
             label = func_name
-            style_class = "funcNode"
 
             try:
                 args_obj = json.loads(args_str) if args_str else {}
-                if func_name == "gather_submit":
-                    label = f"gather_submit<br/>{sanitize_label(args_obj.get('answer', ''))}"
-                    style_class = "gatherNode"
-                elif func_name == "resolve_location":
-                    label = f"resolve_location<br/>{sanitize_label(args_obj.get('location_text', ''))} ({args_obj.get('location_type', '')})"
+                if func_name == "resolve_location":
+                    loc = sanitize_label(args_obj.get("location_text", ""))
+                    loc_type = args_obj.get("location_type", "")
+                    label = f"resolve_location<br/>{loc} ({loc_type})" if loc else func_name
                 elif func_name == "select_trip_type":
-                    label = f"select_trip_type<br/>{args_obj.get('trip_type', '').replace('_', ' ')}"
+                    label = "select_trip_type<br/>(from gather)"
                 elif func_name == "select_flight":
-                    label = f"select_flight<br/>Option {args_obj.get('option_number', '')}"
+                    opt = args_obj.get("option_number", "")
+                    label = f"select_flight<br/>Option {opt}" if opt else func_name
+                elif args_obj:
+                    # Generic: show first arg key=value if short enough
+                    first_key, first_val = next(iter(args_obj.items()))
+                    short = sanitize_label(f"{first_key}={first_val}")
+                    label = f"{func_name}<br/>{short}"
             except:
                 pass
 
-            lines.append(f'    {func_node}["{label}"]:::{style_class}')
+            lines.append(f'    {func_node}["{label}"]:::funcNode')
 
             if step in last_func_per_step and last_func_per_step[step]:
                 lines.append(f'    {last_func_per_step[step]} --> {func_node}')
@@ -2026,6 +2069,36 @@ def _generate_mermaid_flow(flow):
                 lines.append(f'    {step_nodes[step]} -.-> {func_node}')
 
             last_func_per_step[step] = func_node
+
+        elif item["type"] == "gather_question":
+            q_node = f"Q{node_id}"
+            node_id += 1
+            step = item["step"]
+            key = item.get("key", "?")
+            lines.append(f'    {q_node}(["? {sanitize_label(key)}"]):::gatherQNode')
+
+            if step in last_func_per_step and last_func_per_step[step]:
+                lines.append(f'    {last_func_per_step[step]} -.-> {q_node}')
+            elif step in step_nodes:
+                lines.append(f'    {step_nodes[step]} -.-> {q_node}')
+
+            last_func_per_step[step] = q_node
+
+        elif item["type"] == "gather_answer":
+            a_node = f"A{node_id}"
+            node_id += 1
+            step = item["step"]
+            key = item.get("key", "?")
+            confirmed = item.get("confirmed", False)
+            check = " v" if confirmed else ""
+            lines.append(f'    {a_node}(["{sanitize_label(key)}{check}"]):::gatherANode')
+
+            if step in last_func_per_step and last_func_per_step[step]:
+                lines.append(f'    {last_func_per_step[step]} --> {a_node}')
+            elif step in step_nodes:
+                lines.append(f'    {step_nodes[step]} -.-> {a_node}')
+
+            last_func_per_step[step] = a_node
 
     return "\n".join(lines)
 
