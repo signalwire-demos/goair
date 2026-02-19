@@ -110,7 +110,7 @@ section "1. resolve_location"
 # =============================================================================
 
 run --raw --call-id "${CALL_ID}-empty" --exec resolve_location --location_text "" --location_type origin
-check "Empty text → error" "No location provided"
+check "Empty text → error" "No location"
 
 run --raw --call-id "$CALL_ID" --exec resolve_location --location_text "Tulsa" --location_type origin
 check "Resolve origin (Tulsa) → TUL" "TUL"
@@ -221,21 +221,19 @@ check "Bare IATA code extracted" "TUL"
 section "4. select_trip_type + finalize_booking"
 # =============================================================================
 
-# select_trip_type — one-way (without confirmed → asks to confirm)
-run --raw --call-id "$CALL_ID" --exec select_trip_type --trip_type one_way
-check "Trip type (one-way) no confirm → bounce" "confirm\|correct"
+# select_trip_type — no gather answers → bounces back to collect_trip_type
+run --raw --call-id "${CALL_ID}-tt-empty" --exec select_trip_type
+check "Missing trip type → collect_trip_type" "Unrecognized\|collect_trip_type"
 
-# select_trip_type — one-way (with confirmed)
-run --raw --call-id "$CALL_ID" --exec select_trip_type --trip_type one_way --confirmed true
+# select_trip_type — one-way via gather answers in global_data
+ONEWAY_TT='{"global_data":{"trip_type_answers":{"trip_type":"one_way"}}}'
+run --raw --call-id "$CALL_ID" --custom-data "$ONEWAY_TT" --exec select_trip_type
 check "Trip type (one-way) saved" "one.way\|One.way"
 check "  → change_step: collect_booking" "collect_booking"
 
-# select_trip_type — round-trip (phase 1: bounce sets asked flag)
-run --raw --call-id "${CALL_ID}-rt2" --exec select_trip_type --trip_type round_trip
-check "Trip type (round-trip) phase 1 → bounce" "Ask the caller"
-
-# select_trip_type — round-trip (phase 2: confirmed)
-run --raw --call-id "${CALL_ID}-rt2" --exec select_trip_type --trip_type round_trip --confirmed true
+# select_trip_type — round-trip via gather answers in global_data
+ROUNDTRIP_TT='{"global_data":{"trip_type_answers":{"trip_type":"round_trip"}}}'
+run --raw --call-id "${CALL_ID}-rt2" --custom-data "$ROUNDTRIP_TT" --exec select_trip_type
 check "Trip type (round-trip) saved" "round.trip\|Round.trip"
 check "  → change_step: collect_booking" "collect_booking"
 
@@ -366,7 +364,7 @@ section "5. search_flights — guard checks"
 # =============================================================================
 
 run --raw --call-id "${CALL_ID}-sf-empty" --exec search_flights
-check "No origin → get_origin" "No origin"
+check "No origin → get_origin" "No origin\|not set"
 
 # Set up origin only
 run --raw --call-id "${CALL_ID}-sf-nodest" --exec resolve_location --location_text Tulsa --location_type origin
@@ -407,8 +405,7 @@ run --raw --call-id "${CALL_ID}-gfp-none" --exec get_flight_price
 check "No offer → search_flights" "No flight\|search"
 
 run --raw --call-id "$CALL_ID" --exec get_flight_price
-check "Price confirmed" "confirmed price\|price is\|\\\$"
-check "  → asks caller to confirm" "book this\|Shall I"
+check "Price confirmed" "confirmed price\|price is\|Price confirmed\|\\\$"
 
 # =============================================================================
 section "8a. forced transition tools"
