@@ -518,15 +518,14 @@ class VoyagerAgent(AgentBase):
             ) \
             .set_valid_steps(["save_profile_step"])
 
-        # Save profile after gather completes
+        # Save profile after gather completes — bridge step, routing forced by save_profile tool
         ctx.add_step("save_profile_step") \
             .add_section("Task", "Save the completed profile") \
             .add_bullets("Process", [
-                "Call save_profile to create the passenger record",
-                "Profile data is in ${profile_answers}"
+                "Call save_profile immediately — profile data is in ${profile_answers}",
             ]) \
             .set_functions(["save_profile"]) \
-            .set_valid_steps(["get_origin", "collect_profile"])
+            .set_valid_steps(["get_origin"])
 
         @self.tool(name="save_profile",
                    description="Save profile and create passenger",
@@ -754,14 +753,19 @@ class VoyagerAgent(AgentBase):
 
             greeting_step.set_step_criteria("Origin resolved")
 
-            # Disable profile collection steps
+            # Remove profile collection steps — not needed for returning callers
             for step_name in ["collect_profile", "save_profile_step"]:
                 try:
-                    ps = ctx.get_step(step_name)
-                    ps.set_functions("none")
-                    ps.set_valid_steps([])
+                    ctx.remove_step(step_name)
                 except:
                     pass
+
+            # collect_profile no longer exists — remove it from create_booking's valid_steps
+            try:
+                cb = ctx.get_step("create_booking")
+                cb.set_valid_steps(["wrap_up", "error_recovery"])
+            except:
+                pass
 
             agent.prompt_add_section("Passenger Profile", "${global_data.passenger_profile}")
 
