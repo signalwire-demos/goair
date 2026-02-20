@@ -529,7 +529,8 @@ class VoyagerAgent(AgentBase):
 
         @self.tool(name="save_profile",
                    description="Save profile and create passenger",
-                   wait_file="/sounds/typing.mp3")
+                   wait_file="/sounds/typing.mp3",
+                   fillers={"en-US": ["Getting your traveler profile set up", "Saving your details for future trips"]})
         def _save_profile(args, raw_data):
             global_data = (raw_data or {}).get("global_data", {})
             caller_phone = global_data.get("caller_phone", "")
@@ -838,6 +839,7 @@ class VoyagerAgent(AgentBase):
             name="resolve_location",
             description="Resolve a spoken city or place name" ,
             wait_file="/sounds/typing.mp3",
+            fillers={"en-US": ["Let me look that up on the map", "Checking the airport directory", "Finding the nearest airports"]},
             parameters={
                 "type": "object",
                 "properties": {
@@ -1031,6 +1033,7 @@ class VoyagerAgent(AgentBase):
             name="select_airport",
             description="Select an airport from the disambiguation candidates.",
             wait_file="/sounds/typing.mp3",
+            fillers={"en-US": ["Locking in that airport", "Setting that as your departure point"]},
             parameters={
                 "type": "object",
                 "properties": {
@@ -1107,6 +1110,7 @@ class VoyagerAgent(AgentBase):
             name="select_trip_type",
             description="Record the trip type from gather and route to booking. Call immediately with no arguments.",
             wait_file="/sounds/typing.mp3",
+            fillers={"en-US": ["Got it, setting up your trip", "Noted, pulling that together"]},
             parameters={"type": "object", "properties": {}, "required": []},
         )
         def select_trip_type(args, raw_data):
@@ -1141,6 +1145,7 @@ class VoyagerAgent(AgentBase):
             name="finalize_profile",
             description="Save the completed profile. Reads from profile_answers in global_data.",
             wait_file="/sounds/typing.mp3",
+            fillers={"en-US": ["Creating your passenger profile", "Saving that for next time"]},
             parameters={"type": "object", "properties": {}, "required": []},
         )
         def finalize_profile(args, raw_data):
@@ -1221,6 +1226,7 @@ class VoyagerAgent(AgentBase):
             name="finalize_booking",
             description="Store the collected booking details. Reads from booking_answers in global_data.",
             wait_file="/sounds/typing.mp3",
+            fillers={"en-US": ["Let me pull your trip details together", "Processing your travel dates"]},
             parameters={"type": "object", "properties": {}, "required": []},
         )
         def finalize_booking(args, raw_data):
@@ -1398,6 +1404,7 @@ class VoyagerAgent(AgentBase):
             name="search_flights",
             description="Search for available flights and return up to 3 options.",
             wait_file="/sounds/typing.mp3",
+            fillers={"en-US": ["Scanning the departure boards now", "Checking what airlines have on that route", "Let me see what's flying that day"]},
             parameters={
                 "type": "object",
                 "properties": {},
@@ -1441,6 +1448,7 @@ class VoyagerAgent(AgentBase):
             description="Select one of the flight options returned by search_flights. "
                         "Call this after the caller picks option 1, 2, or 3.",
             wait_file="/sounds/typing.mp3",
+            fillers={"en-US": ["Nice pick, pulling up that itinerary", "Let me grab the details on that flight"]},
             parameters={
                 "type": "object",
                 "properties": {
@@ -1491,6 +1499,7 @@ class VoyagerAgent(AgentBase):
             name="restart_search",
             description="Caller wants to change dates or route. Call this instead of select_flight.",
             wait_file="/sounds/typing.mp3",
+            fillers={"en-US": ["No problem, let's explore some other options", "Fresh search coming right up"]},
             parameters={
                 "type": "object",
                 "properties": {
@@ -1526,6 +1535,7 @@ class VoyagerAgent(AgentBase):
             name="restart_booking",
             description="Restart the booking with new dates. Call from error recovery.",
             wait_file="/sounds/typing.mp3",
+            fillers={"en-US": ["Let's try some different dates", "Back to the drawing board on dates"]},
             parameters={"type": "object", "properties": {}, "required": []},
         )
         def restart_booking(args, raw_data):
@@ -1544,6 +1554,7 @@ class VoyagerAgent(AgentBase):
             name="get_flight_price",
             description="Confirm the exact price for the flight selected via select_flight.",
             wait_file="/sounds/typing.mp3",
+            fillers={"en-US": ["Checking the live fare now", "Let me confirm that price with the airline"]},
             parameters={
                 "type": "object",
                 "properties": {},
@@ -1593,6 +1604,7 @@ class VoyagerAgent(AgentBase):
             name="confirm_booking",
             description="Caller accepted the price — proceed to booking.",
             wait_file="/sounds/typing.mp3",
+            fillers={"en-US": ["Wonderful, locking in your seat", "Great, setting up the reservation"]},
             parameters={"type": "object", "properties": {}, "required": []},
         )
         def confirm_booking(args, raw_data):
@@ -1605,6 +1617,7 @@ class VoyagerAgent(AgentBase):
             name="decline_booking",
             description="Caller declined the price — go back to flight options.",
             wait_file="/sounds/typing.mp3",
+            fillers={"en-US": ["No worries, let's look at the other flights", "Sure thing, back to the options"]},
             parameters={"type": "object", "properties": {}, "required": []},
         )
         def decline_booking(args, raw_data):
@@ -1617,7 +1630,7 @@ class VoyagerAgent(AgentBase):
             name="book_flight",
             description="Book the confirmed flight and create a PNR.",
             wait_file="/sounds/typing.mp3",
-            fillers={"en-US": ["Booking that for you now"]},
+            fillers={"en-US": ["Booking that for you now", "Securing your seat on the flight", "Finalizing your reservation"]},
             parameters={
                 "type": "object",
                 "properties": {},
