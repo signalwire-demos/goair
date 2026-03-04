@@ -657,7 +657,17 @@ class VoyagerAgent(AgentBase):
                 "What cabin class would you like — you usually fly ${global_data.passenger_profile.cabin_preference}?",
                 prompt="Options: ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST."
             ) \
-            .set_valid_steps(["search_and_present"])
+            .set_valid_steps(["apply_booking"])
+
+        # APPLY BOOKING — bridge step; gather completed, AI calls search_flights immediately
+        apply_booking = ctx.add_step("apply_booking")
+        apply_booking.add_section("Task", "Search for flights with the collected booking details")
+        apply_booking.add_bullets("Process", [
+            "The caller already provided travel dates and preferences via gather — call search_flights immediately",
+        ])
+        apply_booking.set_step_criteria("Flight search completed")
+        apply_booking.set_functions(["search_flights"])
+        apply_booking.set_valid_steps(["present_options", "error_recovery"])
 
         # ONE-WAY: no return date question
         ctx.add_step("collect_booking_oneway") \
@@ -986,15 +996,21 @@ class VoyagerAgent(AgentBase):
                 result.add_dynamic_hints([h for h in [top["name"], top["city"]] if h])
                 save_call_state(call_id, state)
                 _sync_summary(result, state)
-                # Mid-flow rejoin: if origin just resolved and destination already set,
-                # skip asking destination again and jump to the right point in the flow.
-                if location_type == "origin" and state.get("destination"):
-                    if state.get("departure_date"):
-                        _change_step(result, "search_and_present")
-                    elif state.get("trip_type"):
-                        _change_step(result, _booking_step(state))
+                # Route to the correct next step based on what's already collected.
+                if location_type == "origin":
+                    if state.get("destination"):
+                        # Mid-flow rejoin: destination already set, skip ahead
+                        if state.get("departure_date"):
+                            _change_step(result, "search_and_present")
+                        elif state.get("trip_type"):
+                            _change_step(result, _booking_step(state))
+                        else:
+                            _change_step(result, "collect_trip_type")
                     else:
-                        _change_step(result, "collect_trip_type")
+                        _change_step(result, "get_destination")
+                else:
+                    # destination resolved — move to trip type
+                    _change_step(result, "collect_trip_type")
                 return result
             else:
                 # Multiple airports — need disambiguation
